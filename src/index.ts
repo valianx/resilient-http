@@ -13,14 +13,13 @@
 export * from './types';
 
 // Core algorithms
+export type { BackoffConfig, JitterConfig } from './core';
 export {
-  BackoffConfig,
   DEFAULT_BACKOFF_CONFIG,
   exponentialBackoff,
   linearBackoff,
   constantBackoff,
   calculateBackoff,
-  JitterConfig,
   DEFAULT_JITTER_CONFIG,
   fullJitter,
   equalJitter,

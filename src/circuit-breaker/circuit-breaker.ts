@@ -212,6 +212,9 @@ export class CircuitBreaker {
     if (state === 'closed') {
       this.records = [];
       this.halfOpenSuccesses = 0;
+    } else if (state === 'open') {
+      // Set lastFailureTime to prevent immediate transition to half-open
+      this.lastFailureTime = Date.now();
     }
   }
 
@@ -318,7 +321,7 @@ export function withCircuitBreaker<TArgs extends unknown[], TResult>(
   const wrapped = (...args: TArgs) => breaker.execute(() => fn(...args));
 
   // Expose breaker for inspection
-  (wrapped as { breaker: CircuitBreaker }).breaker = breaker;
+  (wrapped as unknown as { breaker: CircuitBreaker }).breaker = breaker;
 
   return wrapped;
 }

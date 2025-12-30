@@ -1,5 +1,5 @@
+export type { BackoffConfig } from './backoff';
 export {
-  BackoffConfig,
   DEFAULT_BACKOFF_CONFIG,
   exponentialBackoff,
   linearBackoff,
@@ -7,8 +7,8 @@ export {
   calculateBackoff,
 } from './backoff';
 
+export type { JitterConfig } from './jitter';
 export {
-  JitterConfig,
   DEFAULT_JITTER_CONFIG,
   fullJitter,
   equalJitter,
