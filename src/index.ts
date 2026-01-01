@@ -54,4 +54,7 @@ export {
   CircuitBreaker,
   CircuitBreakerOpenError,
   withCircuitBreaker,
+  InMemoryStateStore,
+  createInitialBuckets,
+  createInitialState,
 } from './circuit-breaker';

@@ -95,6 +95,90 @@ export interface RetryOptions {
 export type CircuitState = 'closed' | 'open' | 'half-open';
 
 /**
+ * Bucket data for sliding window counter
+ * Used by StateStore implementations for distributed state
+ */
+export interface BucketData {
+  success: number;
+  failure: number;
+  timestamp: number;
+}
+
+/**
+ * Complete circuit breaker state for persistence
+ * Used by StateStore implementations
+ */
+export interface CircuitBreakerState {
+  /** Current circuit state */
+  state: CircuitState;
+  /** Sliding window buckets */
+  buckets: BucketData[];
+  /** Timestamp of last failure */
+  lastFailureTime: number | null;
+  /** Timestamp of last success */
+  lastSuccessTime: number | null;
+  /** Number of successful probes in half-open state */
+  halfOpenSuccesses: number;
+  /** Number of active requests in half-open state */
+  halfOpenActiveRequests: number;
+}
+
+/**
+ * Interface for distributed circuit breaker state storage
+ *
+ * Implement this interface to share circuit breaker state across multiple
+ * instances (e.g., serverless functions, Kubernetes pods).
+ *
+ * @example
+ * ```typescript
+ * // Redis implementation example
+ * class RedisStateStore implements StateStore {
+ *   constructor(private redis: Redis, private ttl: number = 120) {}
+ *
+ *   async getState(circuitId: string): Promise<CircuitBreakerState | null> {
+ *     const data = await this.redis.get(`circuit:${circuitId}`);
+ *     return data ? JSON.parse(data) : null;
+ *   }
+ *
+ *   async setState(circuitId: string, state: CircuitBreakerState): Promise<void> {
+ *     await this.redis.setex(`circuit:${circuitId}`, this.ttl, JSON.stringify(state));
+ *   }
+ *
+ *   async deleteState(circuitId: string): Promise<void> {
+ *     await this.redis.del(`circuit:${circuitId}`);
+ *   }
+ * }
+ *
+ * // Usage
+ * const breaker = new CircuitBreaker({
+ *   stateStore: new RedisStateStore(redis),
+ *   circuitId: 'payment-service',
+ * });
+ * ```
+ */
+export interface StateStore {
+  /**
+   * Retrieve circuit state by ID
+   * @param circuitId - Unique identifier for the circuit
+   * @returns Circuit state or null if not found
+   */
+  getState(circuitId: string): Promise<CircuitBreakerState | null>;
+
+  /**
+   * Persist circuit state
+   * @param circuitId - Unique identifier for the circuit
+   * @param state - Complete circuit state to persist
+   */
+  setState(circuitId: string, state: CircuitBreakerState): Promise<void>;
+
+  /**
+   * Delete circuit state (e.g., on reset)
+   * @param circuitId - Unique identifier for the circuit
+   */
+  deleteState(circuitId: string): Promise<void>;
+}
+
+/**
  * Configuration options for circuit breaker
  */
 export interface CircuitBreakerOptions {
@@ -118,6 +202,25 @@ export interface CircuitBreakerOptions {
 
   /** Number of buckets for sliding window counter (default: 10, range: 2-60) */
   bucketCount?: number;
+
+  /**
+   * Optional state store for distributed circuit breaker
+   * When provided, circuit state is persisted and shared across instances
+   */
+  stateStore?: StateStore;
+
+  /**
+   * Unique identifier for this circuit (required when using stateStore)
+   * Used as the key for storing/retrieving state
+   */
+  circuitId?: string;
+
+  /**
+   * Interval for syncing state with store in ms (default: 1000)
+   * Lower values = more consistent but more overhead
+   * Only used when stateStore is provided
+   */
+  syncInterval?: number;
 
   /** Callback when circuit opens */
   onOpen?: () => void;

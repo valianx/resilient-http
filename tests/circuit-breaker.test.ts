@@ -1,9 +1,14 @@
-import { describe, it } from 'node:test';
+import { describe, it, beforeEach } from 'node:test';
 import assert from 'node:assert';
 import {
   CircuitBreaker,
   CircuitBreakerOpenError,
 } from '../src/circuit-breaker/circuit-breaker';
+import {
+  InMemoryStateStore,
+  createInitialBuckets,
+  createInitialState,
+} from '../src/circuit-breaker/state-store';
 
 describe('CircuitBreaker', () => {
   describe('initial state', () => {
@@ -483,5 +488,118 @@ describe('CircuitBreaker', () => {
 
       assert.strictEqual(closeCalled, true);
     });
+  });
+});
+
+describe('InMemoryStateStore', () => {
+  let store: InMemoryStateStore;
+
+  beforeEach(() => {
+    store = new InMemoryStateStore();
+  });
+
+  describe('basic operations', () => {
+    it('should return null for non-existent circuit', async () => {
+      const state = await store.getState('non-existent');
+      assert.strictEqual(state, null);
+    });
+
+    it('should store and retrieve circuit state', async () => {
+      const initialState = createInitialState(10);
+      initialState.state = 'open';
+      initialState.lastFailureTime = Date.now();
+
+      await store.setState('test-circuit', initialState);
+      const retrieved = await store.getState('test-circuit');
+
+      assert.notStrictEqual(retrieved, null);
+      assert.strictEqual(retrieved!.state, 'open');
+      assert.strictEqual(retrieved!.lastFailureTime, initialState.lastFailureTime);
+    });
+
+    it('should delete circuit state', async () => {
+      const initialState = createInitialState(10);
+      await store.setState('test-circuit', initialState);
+
+      await store.deleteState('test-circuit');
+      const retrieved = await store.getState('test-circuit');
+
+      assert.strictEqual(retrieved, null);
+    });
+
+    it('should list circuit IDs', async () => {
+      await store.setState('circuit-1', createInitialState(10));
+      await store.setState('circuit-2', createInitialState(10));
+
+      const ids = store.getCircuitIds();
+      assert.deepStrictEqual(ids.sort(), ['circuit-1', 'circuit-2']);
+    });
+
+    it('should clear all states', async () => {
+      await store.setState('circuit-1', createInitialState(10));
+      await store.setState('circuit-2', createInitialState(10));
+
+      store.clear();
+
+      assert.strictEqual(store.getCircuitIds().length, 0);
+    });
+  });
+
+  describe('state isolation', () => {
+    it('should deep clone state to prevent external mutations', async () => {
+      const originalState = createInitialState(10);
+      originalState.buckets[0].success = 5;
+
+      await store.setState('test-circuit', originalState);
+
+      // Mutate the original
+      originalState.buckets[0].success = 100;
+      originalState.state = 'open';
+
+      // Retrieved state should not be affected
+      const retrieved = await store.getState('test-circuit');
+      assert.strictEqual(retrieved!.buckets[0].success, 5);
+      assert.strictEqual(retrieved!.state, 'closed');
+    });
+  });
+});
+
+describe('createInitialBuckets', () => {
+  it('should create correct number of buckets', () => {
+    const buckets = createInitialBuckets(10);
+    assert.strictEqual(buckets.length, 10);
+  });
+
+  it('should initialize buckets with zero counts', () => {
+    const buckets = createInitialBuckets(5);
+    for (const bucket of buckets) {
+      assert.strictEqual(bucket.success, 0);
+      assert.strictEqual(bucket.failure, 0);
+      assert.strictEqual(bucket.timestamp, 0);
+    }
+  });
+});
+
+describe('createInitialState', () => {
+  it('should create state with closed circuit', () => {
+    const state = createInitialState(10);
+    assert.strictEqual(state.state, 'closed');
+  });
+
+  it('should create state with null timestamps', () => {
+    const state = createInitialState(10);
+    assert.strictEqual(state.lastFailureTime, null);
+    assert.strictEqual(state.lastSuccessTime, null);
+  });
+
+  it('should create state with zero counters', () => {
+    const state = createInitialState(10);
+    assert.strictEqual(state.halfOpenSuccesses, 0);
+    assert.strictEqual(state.halfOpenActiveRequests, 0);
+  });
+
+  it('should create state with correct bucket count', () => {
+    const state = createInitialState(15);
+    assert.strictEqual(state.buckets.length, 15);
   });
 });

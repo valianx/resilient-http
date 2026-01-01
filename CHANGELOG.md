@@ -13,6 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `bucketCount` option for CircuitBreaker to configure sliding window granularity (default: 10)
 - Input validation for all CircuitBreaker configuration options with sensible clamping
 - Comprehensive tests for half-open request limiting, sliding window buckets, and state transitions
+- Custom error extractor registry via `registerExtractor()`, `unregisterExtractor()`, `clearExtractors()`, `getRegisteredExtractors()`
+- `ErrorExtractor` interface for integrating custom HTTP clients
+- `StateStore` interface for distributed circuit breaker state persistence
+- `InMemoryStateStore` default implementation for single-instance deployments
+- `CircuitBreakerState` and `BucketData` types for state persistence
+- `createInitialState()` and `createInitialBuckets()` helper functions
+- `stateStore`, `circuitId`, and `syncInterval` options for CircuitBreaker (distributed support)
 
 ### Changed
 
