@@ -1,10 +1,14 @@
-import { describe, it } from 'node:test';
+import { describe, it, beforeEach } from 'node:test';
 import assert from 'node:assert';
 import {
   extractError,
   detectClientType,
   classifyError,
   isRetryableError,
+  registerExtractor,
+  unregisterExtractor,
+  clearExtractors,
+  getRegisteredExtractors,
 } from '../src/errors/extractor';
 
 describe('Error Extraction', () => {
@@ -137,6 +141,252 @@ describe('Error Extraction', () => {
     it('should handle primitive errors', () => {
       const result = extractError('String error');
       assert.strictEqual(result.message, 'String error');
+    });
+  });
+
+  describe('Custom Extractors', () => {
+    // Clear extractors before each test to ensure isolation
+    beforeEach(() => {
+      clearExtractors();
+    });
+
+    it('should register a custom extractor', () => {
+      registerExtractor({
+        name: 'test-client',
+        canHandle: (error) => {
+          return typeof error === 'object' && error !== null && 'isTestError' in error;
+        },
+        extract: (error) => {
+          const e = error as { isTestError: boolean; message: string; code: number };
+          return {
+            originalError: error,
+            message: e.message,
+            statusCode: e.code,
+            classification: 'server',
+            isRetryable: true,
+            clientType: 'custom',
+          };
+        },
+      });
+
+      assert.deepStrictEqual(getRegisteredExtractors(), ['test-client']);
+    });
+
+    it('should use custom extractor when it can handle the error', () => {
+      registerExtractor({
+        name: 'my-client',
+        canHandle: (error) => {
+          return typeof error === 'object' && error !== null && 'isMyClientError' in error;
+        },
+        extract: (error) => {
+          const e = error as { isMyClientError: boolean; statusCode: number; msg: string };
+          const classification = classifyError(e.statusCode);
+          return {
+            originalError: error,
+            message: e.msg,
+            statusCode: e.statusCode,
+            classification,
+            isRetryable: isRetryableError(classification, e.statusCode),
+            clientType: 'custom',
+          };
+        },
+      });
+
+      const customError = {
+        isMyClientError: true,
+        statusCode: 503,
+        msg: 'Service temporarily unavailable',
+      };
+
+      const result = extractError(customError);
+
+      assert.strictEqual(result.message, 'Service temporarily unavailable');
+      assert.strictEqual(result.statusCode, 503);
+      assert.strictEqual(result.classification, 'server');
+      assert.strictEqual(result.isRetryable, true);
+      assert.strictEqual(result.clientType, 'custom');
+    });
+
+    it('should fall back to built-in extractors when custom cannot handle', () => {
+      registerExtractor({
+        name: 'specific-client',
+        canHandle: (error) => {
+          return typeof error === 'object' && error !== null && 'isSpecificError' in error;
+        },
+        extract: () => ({
+          originalError: null,
+          message: 'Should not be called',
+          classification: 'unknown',
+          isRetryable: false,
+          clientType: 'custom',
+        }),
+      });
+
+      // This is an axios error, not a specific-client error
+      const axiosError = {
+        isAxiosError: true,
+        message: 'Axios error',
+        response: { status: 500 },
+        config: {},
+      };
+
+      const result = extractError(axiosError);
+
+      assert.strictEqual(result.clientType, 'axios');
+      assert.strictEqual(result.statusCode, 500);
+    });
+
+    it('should check custom extractors in registration order', () => {
+      const order: string[] = [];
+
+      registerExtractor({
+        name: 'first',
+        canHandle: (error) => {
+          order.push('first');
+          return typeof error === 'object' && error !== null && 'useFirst' in error;
+        },
+        extract: (error) => ({
+          originalError: error,
+          message: 'First extractor',
+          classification: 'unknown',
+          isRetryable: false,
+          clientType: 'custom',
+        }),
+      });
+
+      registerExtractor({
+        name: 'second',
+        canHandle: (error) => {
+          order.push('second');
+          return typeof error === 'object' && error !== null && 'useSecond' in error;
+        },
+        extract: (error) => ({
+          originalError: error,
+          message: 'Second extractor',
+          classification: 'unknown',
+          isRetryable: false,
+          clientType: 'custom',
+        }),
+      });
+
+      extractError({ useSecond: true });
+
+      assert.deepStrictEqual(order, ['first', 'second']);
+    });
+
+    it('should throw when registering duplicate extractor name', () => {
+      registerExtractor({
+        name: 'duplicate',
+        canHandle: () => false,
+        extract: () => ({
+          originalError: null,
+          message: '',
+          classification: 'unknown',
+          isRetryable: false,
+          clientType: 'custom',
+        }),
+      });
+
+      assert.throws(() => {
+        registerExtractor({
+          name: 'duplicate',
+          canHandle: () => false,
+          extract: () => ({
+            originalError: null,
+            message: '',
+            classification: 'unknown',
+            isRetryable: false,
+            clientType: 'custom',
+          }),
+        });
+      }, /already registered/);
+    });
+
+    it('should unregister an extractor', () => {
+      registerExtractor({
+        name: 'to-remove',
+        canHandle: () => false,
+        extract: () => ({
+          originalError: null,
+          message: '',
+          classification: 'unknown',
+          isRetryable: false,
+          clientType: 'custom',
+        }),
+      });
+
+      assert.deepStrictEqual(getRegisteredExtractors(), ['to-remove']);
+
+      const removed = unregisterExtractor('to-remove');
+      assert.strictEqual(removed, true);
+      assert.deepStrictEqual(getRegisteredExtractors(), []);
+    });
+
+    it('should return false when unregistering non-existent extractor', () => {
+      const removed = unregisterExtractor('non-existent');
+      assert.strictEqual(removed, false);
+    });
+
+    it('should clear all extractors', () => {
+      registerExtractor({
+        name: 'one',
+        canHandle: () => false,
+        extract: () => ({
+          originalError: null,
+          message: '',
+          classification: 'unknown',
+          isRetryable: false,
+          clientType: 'custom',
+        }),
+      });
+
+      registerExtractor({
+        name: 'two',
+        canHandle: () => false,
+        extract: () => ({
+          originalError: null,
+          message: '',
+          classification: 'unknown',
+          isRetryable: false,
+          clientType: 'custom',
+        }),
+      });
+
+      assert.strictEqual(getRegisteredExtractors().length, 2);
+
+      clearExtractors();
+
+      assert.strictEqual(getRegisteredExtractors().length, 0);
+    });
+
+    it('should allow custom extractor to override built-in detection', () => {
+      // Register a custom extractor that intercepts axios errors
+      registerExtractor({
+        name: 'axios-override',
+        canHandle: (error) => {
+          return typeof error === 'object' && error !== null && 'isAxiosError' in error;
+        },
+        extract: (error) => ({
+          originalError: error,
+          message: 'Custom axios handling',
+          classification: 'network',
+          isRetryable: false, // Override: not retryable
+          clientType: 'custom',
+        }),
+      });
+
+      const axiosError = {
+        isAxiosError: true,
+        message: 'Original message',
+        response: { status: 500 },
+        config: {},
+      };
+
+      const result = extractError(axiosError);
+
+      assert.strictEqual(result.message, 'Custom axios handling');
+      assert.strictEqual(result.isRetryable, false);
+      assert.strictEqual(result.clientType, 'custom');
     });
   });
 });

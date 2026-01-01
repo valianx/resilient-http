@@ -5,4 +5,8 @@ export {
   extractError,
   createErrorPredicate,
   defaultRetryPredicate,
+  registerExtractor,
+  unregisterExtractor,
+  clearExtractors,
+  getRegisteredExtractors,
 } from './extractor';

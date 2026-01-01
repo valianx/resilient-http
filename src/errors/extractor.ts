@@ -2,6 +2,7 @@ import type {
   StandardizedError,
   ErrorClassification,
   HttpClientType,
+  ErrorExtractor,
 } from '../types';
 
 /**
@@ -33,6 +34,12 @@ const RETRYABLE_STATUS_CODES = new Set([
   503, // Service Unavailable
   504, // Gateway Timeout
 ]);
+
+/**
+ * Registry for custom error extractors
+ * Custom extractors are checked before built-in extractors
+ */
+const customExtractors: ErrorExtractor[] = [];
 
 /**
  * Detect the HTTP client type from error shape
@@ -425,6 +432,10 @@ function extractGenericError(error: unknown): StandardizedError {
  * Automatically detects the HTTP client type and extracts relevant information
  * into a consistent StandardizedError format.
  *
+ * Custom extractors registered via `registerExtractor()` are checked first,
+ * in order of registration. This allows overriding built-in behavior or
+ * supporting custom HTTP clients.
+ *
  * @param error - The error from any HTTP client
  * @returns Standardized error with classification and retryability
  *
@@ -442,6 +453,14 @@ function extractGenericError(error: unknown): StandardizedError {
  * ```
  */
 export function extractError(error: unknown): StandardizedError {
+  // Check custom extractors first (in order of registration)
+  for (const extractor of customExtractors) {
+    if (extractor.canHandle(error)) {
+      return extractor.extract(error);
+    }
+  }
+
+  // Fall back to built-in extractors
   const clientType = detectClientType(error);
   const e = error as Record<string, unknown>;
 
@@ -490,4 +509,88 @@ export function createErrorPredicate(
 export function defaultRetryPredicate(error: unknown): boolean {
   const standardized = extractError(error);
   return standardized.isRetryable;
+}
+
+/**
+ * Register a custom error extractor
+ *
+ * Custom extractors are checked before built-in extractors, in order of registration.
+ * This allows you to handle errors from custom HTTP clients or override built-in behavior.
+ *
+ * @param extractor - The custom extractor to register
+ * @throws Error if an extractor with the same name is already registered
+ *
+ * @example
+ * ```typescript
+ * import { registerExtractor, classifyError, isRetryableError } from 'resilient-http';
+ *
+ * // Register a custom extractor for your HTTP client
+ * registerExtractor({
+ *   name: 'my-http-client',
+ *   canHandle: (error) => {
+ *     return error instanceof MyHttpError;
+ *   },
+ *   extract: (error) => {
+ *     const e = error as MyHttpError;
+ *     const classification = classifyError(e.statusCode, e.code);
+ *     return {
+ *       originalError: error,
+ *       message: e.message,
+ *       statusCode: e.statusCode,
+ *       code: e.code,
+ *       classification,
+ *       isRetryable: isRetryableError(classification, e.statusCode),
+ *       clientType: 'custom',
+ *     };
+ *   },
+ * });
+ * ```
+ */
+export function registerExtractor(extractor: ErrorExtractor): void {
+  // Check for duplicate names
+  const existing = customExtractors.find((e) => e.name === extractor.name);
+  if (existing) {
+    throw new Error(`Extractor with name "${extractor.name}" is already registered`);
+  }
+
+  customExtractors.push(extractor);
+}
+
+/**
+ * Unregister a custom error extractor by name
+ *
+ * @param name - The name of the extractor to remove
+ * @returns true if the extractor was found and removed, false otherwise
+ *
+ * @example
+ * ```typescript
+ * import { unregisterExtractor } from 'resilient-http';
+ *
+ * unregisterExtractor('my-http-client');
+ * ```
+ */
+export function unregisterExtractor(name: string): boolean {
+  const index = customExtractors.findIndex((e) => e.name === name);
+  if (index === -1) {
+    return false;
+  }
+
+  customExtractors.splice(index, 1);
+  return true;
+}
+
+/**
+ * Clear all registered custom extractors
+ * Useful for testing or resetting state
+ */
+export function clearExtractors(): void {
+  customExtractors.length = 0;
+}
+
+/**
+ * Get the list of registered custom extractor names
+ * @returns Array of registered extractor names
+ */
+export function getRegisteredExtractors(): string[] {
+  return customExtractors.map((e) => e.name);
 }

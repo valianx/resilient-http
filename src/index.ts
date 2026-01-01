@@ -40,6 +40,10 @@ export {
   extractError,
   createErrorPredicate,
   defaultRetryPredicate,
+  registerExtractor,
+  unregisterExtractor,
+  clearExtractors,
+  getRegisteredExtractors,
 } from './errors';
 
 // Retry functionality

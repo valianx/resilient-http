@@ -171,7 +171,29 @@ export type HttpClientType =
   | 'got'
   | 'node-fetch'
   | 'undici'
+  | 'custom'
   | 'generic';
+
+/**
+ * Custom error extractor interface
+ * Allows users to register extractors for custom HTTP clients
+ */
+export interface ErrorExtractor {
+  /** Unique name for this extractor (used for clientType) */
+  name: string;
+
+  /**
+   * Check if this extractor can handle the given error
+   * Should return true if the error matches this client's error shape
+   */
+  canHandle(error: unknown): boolean;
+
+  /**
+   * Extract standardized error from the client-specific error
+   * Only called if canHandle() returned true
+   */
+  extract(error: unknown): StandardizedError;
+}
 
 /**
  * Standardized error representation across all HTTP clients
