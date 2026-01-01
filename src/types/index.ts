@@ -98,20 +98,26 @@ export type CircuitState = 'closed' | 'open' | 'half-open';
  * Configuration options for circuit breaker
  */
 export interface CircuitBreakerOptions {
-  /** Failure threshold percentage to open circuit (default: 50) */
+  /** Failure threshold percentage to open circuit (default: 50, range: 1-100) */
   failureThreshold?: number;
 
-  /** Minimum requests before circuit can open (default: 10) */
+  /** Minimum requests before circuit can open (default: 10, minimum: 1) */
   minimumRequests?: number;
 
-  /** Time window for tracking failures in ms (default: 60000) */
+  /** Time window for tracking failures in ms (default: 60000, minimum: 1000) */
   rollingWindow?: number;
 
-  /** Time to wait before attempting half-open in ms (default: 30000) */
+  /** Time to wait before attempting half-open in ms (default: 30000, minimum: 100) */
   resetTimeout?: number;
 
-  /** Successful requests needed to close from half-open (default: 3) */
+  /** Successful requests needed to close from half-open (default: 3, minimum: 1) */
   successThreshold?: number;
+
+  /** Maximum concurrent requests allowed in half-open state (default: 1, minimum: 1) */
+  halfOpenMaxRequests?: number;
+
+  /** Number of buckets for sliding window counter (default: 10, range: 2-60) */
+  bucketCount?: number;
 
   /** Callback when circuit opens */
   onOpen?: () => void;
