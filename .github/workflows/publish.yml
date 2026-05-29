@@ -1,8 +1,8 @@
-name: Publish to npm
+name: Publish
 
 on:
   release:
-    types: [published]
+    types: [created]
 
 jobs:
   publish:
@@ -10,27 +10,26 @@ jobs:
     permissions:
       contents: read
       id-token: write
-
     steps:
       - uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: 24
           registry-url: 'https://registry.npmjs.org'
-          cache: 'yarn'
+          cache: 'pnpm'
 
       - name: Install dependencies
-        run: yarn install --frozen-lockfile
-
-      - name: Type check
-        run: yarn typecheck
+        run: pnpm install --frozen-lockfile
 
       - name: Build
-        run: yarn build
+        run: pnpm build
 
       - name: Publish to npm
-        run: npm publish --provenance --access public
+        run: pnpm publish --provenance --access public --no-git-checks
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

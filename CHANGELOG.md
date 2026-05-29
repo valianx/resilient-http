@@ -7,36 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0] — 2026-05-29
+
+### Breaking Changes
+
+- **API surface replaced.** The v1 public API has been removed: `retry()`, `retryWithSignal()`, `withRetry()`, `CircuitBreaker`, `withCircuitBreaker()`, `registerExtractor()`, multi-client error extractors (`AxiosExtractor`, `GotExtractor`, etc.), `StateStore` / `InMemoryStateStore`, and the RxJS observable integration are all gone. The library now exposes a single factory: `createResilientHttp()`.
+- **Retry status codes.** HTTP 409 Conflict removed from the default `retryableStatuses` list. Only server-side idempotent errors (503, 504, etc.) are retried by default.
+- **Node.js minimum.** Engine requirement bumped to `>=24.0.0` (was `>=18.0.0`).
+- **Package manager.** Migrated from yarn to pnpm (`pnpm@11.1.3`). `yarn.lock` removed; `pnpm-lock.yaml` is the canonical lockfile.
+
 ### Added
 
-- `halfOpenMaxRequests` option for CircuitBreaker to limit concurrent probe requests in half-open state (default: 1)
-- `bucketCount` option for CircuitBreaker to configure sliding window granularity (default: 10)
-- Input validation for all CircuitBreaker configuration options with sensible clamping
-- Comprehensive tests for half-open request limiting, sliding window buckets, and state transitions
-- Custom error extractor registry via `registerExtractor()`, `unregisterExtractor()`, `clearExtractors()`, `getRegisteredExtractors()`
-- `ErrorExtractor` interface for integrating custom HTTP clients
-- `StateStore` interface for distributed circuit breaker state persistence
-- `InMemoryStateStore` default implementation for single-instance deployments
-- `CircuitBreakerState` and `BucketData` types for state persistence
-- `createInitialState()` and `createInitialBuckets()` helper functions
-- `stateStore`, `circuitId`, and `syncInterval` options for CircuitBreaker (distributed support)
-
-### Changed
-
-- **BREAKING**: CircuitBreaker now uses sliding window buckets instead of individual request records
-  - Memory complexity reduced from O(N) to O(buckets) where N = requests in window
-  - At 2000 RPS with 60s window: ~400 bytes instead of ~9.6MB
-  - CPU complexity for pruning reduced from O(N) to O(buckets)
-- CircuitBreaker now limits requests in half-open state to prevent thundering herd on recovery
-- `getState()` now uses a transition flag to prevent race conditions during concurrent calls
-
-### Deprecated
+- `createResilientHttp()` factory — fetch-first wrapper with unified retry + backoff configuration.
+- Changesets for automated versioning and CHANGELOG generation going forward.
 
 ### Removed
 
-### Fixed
+- `retry()`, `retryWithSignal()`, `withRetry()` — removed from public API.
+- `CircuitBreaker` class and `withCircuitBreaker()` — removed.
+- Custom error extractor registry (`registerExtractor`, `unregisterExtractor`, `clearExtractors`, `getRegisteredExtractors`).
+- `StateStore` / `InMemoryStateStore` / `CircuitBreakerState` / `BucketData` types.
+- Multi-client error extractors (Axios, Got, Undici, node-fetch specific).
+- `halfOpenMaxRequests`, `bucketCount` CircuitBreaker options.
+- Sub-path exports: `resilient-http/circuit-breaker`, `resilient-http/observable`.
 
-- Race condition in `getState()` that could cause multiple concurrent state transitions
-- Memory leak in high-throughput scenarios where individual request records accumulated
+### Changed
 
-### Security
+- Zero runtime dependencies maintained — pnpm is a dev toolchain change only.
+- CI now runs exclusively on Node 24 (`matrix: node-version: [24]`).
+
+## [1.0.0] — Initial release
+
+- `retry()`, `retryWithSignal()`, `withRetry()` with exponential/linear/constant backoff and full/equal/decorrelated/none jitter.
+- `CircuitBreaker` with sliding window buckets, half-open limiting, and distributed `StateStore` interface.
+- Multi-client error extraction (Axios, Fetch, Got, Undici, node-fetch) with custom extractor registry.
+- Works with Node.js 18+, Bun 1.0+, and browsers (ESM).
