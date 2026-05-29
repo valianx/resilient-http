@@ -2,7 +2,7 @@
  * resilient-http
  *
  * A zero-dependency library for resilient HTTP operations
- * with retry logic, circuit breaker, and error extraction.
+ * with retry logic and error extraction.
  *
  * Works with Node.js, Bun, and browsers.
  *
@@ -49,12 +49,3 @@ export {
 // Retry functionality
 export { retry, retryWithSignal, withRetry } from './retry';
 
-// Circuit breaker
-export {
-  CircuitBreaker,
-  CircuitBreakerOpenError,
-  withCircuitBreaker,
-  InMemoryStateStore,
-  createInitialBuckets,
-  createInitialState,
-} from './circuit-breaker';

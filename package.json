@@ -1,7 +1,7 @@
 {
   "name": "resilient-http",
   "version": "1.0.0",
-  "description": "Framework-agnostic HTTP resilience library with retry, circuit breaker, and error extraction. Works with Node.js, Bun, and browsers.",
+  "description": "Framework-agnostic HTTP resilience library with retry logic and error extraction. Works with Node.js, Bun, and browsers.",
   "author": "valianx",
   "license": "MIT",
   "repository": {
@@ -28,12 +28,6 @@
       "types": "./dist/retry/index.d.ts",
       "import": "./dist/retry/index.js",
       "require": "./dist/retry/index.cjs"
-    },
-    "./circuit-breaker": {
-      "bun": "./src/circuit-breaker/index.ts",
-      "types": "./dist/circuit-breaker/index.d.ts",
-      "import": "./dist/circuit-breaker/index.js",
-      "require": "./dist/circuit-breaker/index.cjs"
     },
     "./errors": {
       "bun": "./src/errors/index.ts",
@@ -71,26 +65,16 @@
     "format": "prettier --write \"src/**/*.ts\"",
     "prepublishOnly": "npm run build"
   },
-  "peerDependencies": {
-    "rxjs": "^7.0.0"
-  },
-  "peerDependenciesMeta": {
-    "rxjs": {
-      "optional": true
-    }
-  },
   "devDependencies": {
     "@types/node": "^20.10.0",
     "bun-types": "^1.0.0",
     "tsup": "^8.0.0",
     "tsx": "^4.7.0",
-    "typescript": "^5.3.0",
-    "rxjs": "^7.8.0"
+    "typescript": "^5.3.0"
   },
   "keywords": [
     "http",
     "retry",
-    "circuit-breaker",
     "resilience",
     "error-handling",
     "backoff",
@@ -105,6 +89,6 @@
     "fault-tolerance"
   ],
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=22.0.0"
   }
 }
