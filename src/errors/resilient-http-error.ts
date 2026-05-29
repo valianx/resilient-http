@@ -35,6 +35,16 @@ export const RESILIENT_HTTP_ERROR_BRAND = Symbol.for('resilient-http.error');
 /** Default maximum captured body size (~1 MB in characters). */
 const DEFAULT_MAX_BODY_SIZE = 1_048_576;
 
+/**
+ * Default maximum size for the error message string (characters).
+ * The message is a summary for wire/logs — not a raw body dump.
+ * Capping here prevents a large body (e.g. payment response with PAN/token)
+ * from escaping into logs via toJSON().message regardless of maxBodySize.
+ *
+ * fix(security): SEC-001 — prevents raw body leak via toJSON() message field.
+ */
+const DEFAULT_MAX_MESSAGE_SIZE = 512;
+
 /** Sentinel appended to a truncated body to signal truncation. */
 const TRUNCATED_MARKER = '[TRUNCATED]';
 
@@ -131,6 +141,21 @@ export type ResilientHttpErrorInit =
 function truncateBody(raw: string, maxSize: number): string {
   if (raw.length <= maxSize) return raw;
   return raw.slice(0, maxSize) + TRUNCATED_MARKER;
+}
+
+/**
+ * Truncate an error message to DEFAULT_MAX_MESSAGE_SIZE characters.
+ *
+ * The message ends up in toJSON() and therefore in logs and BFF wire responses.
+ * A hard cap here ensures that a large response body (e.g. payment response
+ * containing PAN/token/PII) cannot leak via the message field regardless of the
+ * maxBodySize configuration.
+ *
+ * fix(security): SEC-001 — called from #resolveMessage before super(message).
+ */
+function truncateMessage(msg: string): string {
+  if (msg.length <= DEFAULT_MAX_MESSAGE_SIZE) return msg;
+  return msg.slice(0, DEFAULT_MAX_MESSAGE_SIZE) + TRUNCATED_MARKER;
 }
 
 /**
@@ -314,9 +339,13 @@ export class ResilientHttpError extends Error implements StandardizedError {
    */
   static #resolveMessage(init: ResilientHttpErrorInit): string {
     if (init.kind === 'response') {
+      // fix(security): SEC-001 — pass the raw body to extractMessageFromBody but
+      // cap the resulting string to DEFAULT_MAX_MESSAGE_SIZE before it becomes
+      // this.message (which toJSON() includes). capBody/this.body is assigned
+      // AFTER super(), so we cannot rely on it here; cap independently.
       const extracted = extractMessageFromBody(init.body, init.contentType);
-      if (extracted) return extracted;
-      if (init.statusText) return init.statusText;
+      if (extracted) return truncateMessage(extracted);
+      if (init.statusText) return truncateMessage(init.statusText);
       return `HTTP ${init.statusCode}`;
     }
 
@@ -327,8 +356,9 @@ export class ResilientHttpError extends Error implements StandardizedError {
       return 'Network error';
     }
 
-    // kind === 'setup'
-    return init.message;
+    // kind === 'setup' — message is developer-controlled but cap for consistency
+    // in case a very long diagnostic string is passed inadvertently.
+    return truncateMessage(init.message);
   }
 
   /**

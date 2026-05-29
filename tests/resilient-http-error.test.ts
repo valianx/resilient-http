@@ -687,6 +687,164 @@ describe('ResilientHttpError — AC-7 anti-leak scan', () => {
 });
 
 // ============================================================================
+// SEC-001 — message is capped; large body cannot leak via toJSON().message
+// ============================================================================
+
+describe('ResilientHttpError — SEC-001 message capping (anti-body-leak via message)', () => {
+  const MAX_MESSAGE_SIZE = 512;
+  const TRUNCATED_MARKER = '[TRUNCATED]';
+
+  it('kind:response with large string body caps message to ≤512+marker chars', () => {
+    const secret = 'sk_live_SECRETO123';
+    const largeBody = secret + 'x'.repeat(5000);
+    const err = new ResilientHttpError({
+      kind: 'response',
+      statusCode: 400,
+      body: largeBody,
+      // no contentType → extractMessageFromBody returns raw string
+    });
+
+    const serialised = JSON.stringify(err.toJSON());
+
+    // The message must be capped — body was 5000+ chars, message must not be that large
+    assert.ok(
+      err.message.length <= MAX_MESSAGE_SIZE + TRUNCATED_MARKER.length,
+      `message exceeds cap: length=${err.message.length}`
+    );
+
+    // The truncation marker must be present when body exceeds the cap
+    assert.ok(
+      err.message.endsWith(TRUNCATED_MARKER),
+      `Expected truncation marker in message: "${err.message.slice(-20)}"`
+    );
+
+    // The full body must not appear in the serialised toJSON() output
+    assert.ok(
+      !serialised.includes(largeBody),
+      'Full large body must not appear in toJSON() serialisation'
+    );
+
+    // The secret (positioned past the cap) must not appear in the serialised output
+    // Note: the secret is at position 0 so it MAY appear in the first 512 chars,
+    // but the body beyond the cap must not appear.
+    const expectedMaxLen = MAX_MESSAGE_SIZE + TRUNCATED_MARKER.length;
+    assert.ok(
+      serialised.includes(err.message),
+      'serialised output should contain the truncated message'
+    );
+    assert.ok(
+      err.message.length <= expectedMaxLen,
+      `message must fit within cap+marker: ${err.message.length} > ${expectedMaxLen}`
+    );
+  });
+
+  it('SEC-001 regression: secret beyond the 512-char cap does not appear in toJSON()', () => {
+    // Place the secret AFTER position 512 so it must be cut off
+    const padding = 'a'.repeat(520);
+    const secret = 'sk_live_SECRETO_BEYOND_CAP';
+    const largeBody = padding + secret + 'x'.repeat(100);
+
+    const err = new ResilientHttpError({
+      kind: 'response',
+      statusCode: 402,
+      body: largeBody,
+    });
+
+    const serialised = JSON.stringify(err.toJSON());
+
+    // The secret is beyond position 512 — it must not appear anywhere in toJSON()
+    assertNoLeak(serialised, secret, 'SEC-001 secret beyond cap in toJSON().message');
+
+    // Message must be capped
+    assert.ok(
+      err.message.length <= MAX_MESSAGE_SIZE + TRUNCATED_MARKER.length,
+      `message length ${err.message.length} exceeds cap`
+    );
+  });
+
+  it('SEC-001: kind:response with JSON body where detail is gigantic caps message', () => {
+    const largeDetail = 'x'.repeat(5000);
+    const err = new ResilientHttpError({
+      kind: 'response',
+      statusCode: 422,
+      body: { detail: largeDetail },
+      contentType: 'application/problem+json',
+    });
+
+    const serialised = JSON.stringify(err.toJSON());
+
+    // message must be capped
+    assert.ok(
+      err.message.length <= MAX_MESSAGE_SIZE + TRUNCATED_MARKER.length,
+      `message length ${err.message.length} exceeds cap for JSON detail field`
+    );
+
+    assert.ok(
+      err.message.endsWith(TRUNCATED_MARKER),
+      `Expected truncation marker in message from JSON detail`
+    );
+
+    // The full 5000-char detail must not appear in toJSON() output
+    assert.ok(
+      !serialised.includes(largeDetail),
+      'Full JSON detail must not appear in toJSON() serialisation'
+    );
+  });
+
+  it('SEC-001: kind:setup with a very long message caps it for consistency', () => {
+    const longMessage = 'Configuration error: ' + 'y'.repeat(1000);
+    const err = new ResilientHttpError({
+      kind: 'setup',
+      message: longMessage,
+    });
+
+    assert.ok(
+      err.message.length <= MAX_MESSAGE_SIZE + TRUNCATED_MARKER.length,
+      `setup message length ${err.message.length} exceeds cap`
+    );
+
+    assert.ok(
+      err.message.endsWith(TRUNCATED_MARKER),
+      'Expected truncation marker in long setup message'
+    );
+  });
+
+  it('SEC-001: short message is not truncated', () => {
+    const shortMessage = 'Payment declined';
+    const err = new ResilientHttpError({
+      kind: 'response',
+      statusCode: 402,
+      body: shortMessage,
+    });
+
+    assert.strictEqual(
+      err.message,
+      shortMessage,
+      'Short message must not be modified or have marker appended'
+    );
+  });
+
+  it('SEC-001: message at exactly the cap boundary is not truncated', () => {
+    const exactMessage = 'z'.repeat(MAX_MESSAGE_SIZE);
+    const err = new ResilientHttpError({
+      kind: 'response',
+      statusCode: 500,
+      body: exactMessage,
+    });
+
+    assert.strictEqual(
+      err.message,
+      exactMessage,
+      'Message exactly at cap must not be truncated'
+    );
+    assert.ok(
+      !err.message.endsWith(TRUNCATED_MARKER),
+      'Message at exact cap must not have truncation marker'
+    );
+  });
+});
+
+// ============================================================================
 // AC-10 — fail-safe URL: relative / malformed URL hides query, never emits raw
 // ============================================================================
 
