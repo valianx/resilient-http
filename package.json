@@ -59,7 +59,7 @@
     "build": "tsup",
     "dev": "tsup --watch",
     "test": "bun test",
-    "test:node": "node --import tsx --test tests/backoff.test.ts tests/error-extraction.test.ts tests/jitter.test.ts tests/retry-engine.test.ts tests/signals.test.ts",
+    "test:node": "node --import tsx --test tests/index.ts",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src --ext .ts",
     "format": "prettier --write \"src/**/*.ts\"",
