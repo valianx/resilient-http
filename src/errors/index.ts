@@ -6,3 +6,11 @@ export {
   classifyError,
   isRetryableError,
 } from '../core/classify';
+
+// ResilientHttpError — canonical error class (v2 public API)
+export {
+  RESILIENT_HTTP_ERROR_BRAND,
+  ResilientHttpError,
+  isResilientHttpError,
+} from './resilient-http-error';
+export type { ResilientHttpErrorInit } from './resilient-http-error';

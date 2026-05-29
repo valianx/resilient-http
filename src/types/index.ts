@@ -163,40 +163,72 @@ export type ErrorClassification =
   | 'unknown'; // Unable to classify
 
 /**
- * Standardized error representation
+ * Error kind discriminant.
+ * - 'response': received a non-2xx HTTP response
+ * - 'network':  fetch/request itself rejected (no response received)
+ * - 'setup':    error constructing the request before any network activity
+ */
+export type ErrorKind = 'response' | 'network' | 'setup';
+
+/**
+ * Standardized error representation (v2).
+ *
+ * Implemented by ResilientHttpError. The interface is exported so consumers
+ * can write typed error-handling utilities without depending on the class.
  */
 export interface StandardizedError {
-  /** Original error object */
-  originalError: unknown;
+  /** Discriminant describing when / where the error occurred. */
+  kind: ErrorKind;
 
-  /** Human-readable error message */
+  /** Human-readable error message. */
   message: string;
 
-  /** HTTP status code (if available) */
-  statusCode?: number;
-
-  /** HTTP method */
-  method?: string;
-
-  /** Request URL */
-  url?: string;
-
-  /** Response headers */
-  headers?: Record<string, string>;
-
-  /** Response body */
-  body?: unknown;
-
-  /** Error code (ECONNREFUSED, ERR_NETWORK, etc.) */
-  code?: string;
-
-  /** Error classification */
+  /** Error classification (network, timeout, server, rate-limit, …). */
   classification: ErrorClassification;
 
-  /** Is this error retryable? */
+  /** Whether this error is eligible for retry. */
   isRetryable: boolean;
 
-  /** Additional metadata */
-  metadata?: Record<string, unknown>;
+  /** Total number of attempts made before this error was thrown. */
+  attempts: number;
+
+  /** HTTP status code — present only for kind:'response'. */
+  statusCode?: number;
+
+  /** HTTP method (upper-cased, e.g. 'GET'). */
+  method?: string;
+
+  /** Request URL (raw, not redacted). */
+  url?: string;
+
+  /** Response headers — present for kind:'response' when captured. */
+  headers?: Record<string, string>;
+
+  /**
+   * Response body — present for kind:'response', capped at maxBodySize.
+   * Not included in toJSON() by default.
+   */
+  body?: unknown;
+
+  /** Network error code (e.g. 'ECONNREFUSED', 'ABORT_ERR'). */
+  code?: string;
+
+  /** Underlying cause error. Not included in toJSON() by default. */
+  cause?: unknown;
+
+  /** Opaque ID for the overall request (e.g. from a correlation header). */
+  requestId?: string;
+
+  /** Opaque ID for the specific attempt (e.g. a per-attempt trace ID). */
+  attemptId?: string;
+
+  /**
+   * Arbitrary metadata for runtime use only.
+   * Never included in toJSON() — must not appear in logs or wire responses.
+   */
+  meta?: Record<string, unknown>;
+
+  /** Return a log/wire-safe JSON representation (no body, cause, or meta). */
+  toJSON(): Record<string, unknown>;
 }
 
