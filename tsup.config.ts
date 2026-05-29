@@ -15,7 +15,7 @@ export default defineConfig({
   clean: true,
   treeshake: true,
   minify: false,
-  target: 'es2022',
+  target: 'es2023',
   outDir: 'dist',
   platform: 'neutral',
 });

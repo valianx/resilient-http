@@ -162,39 +162,8 @@ export type ErrorClassification =
   | 'cancelled' // Request cancelled
   | 'unknown'; // Unable to classify
 
-/** Detected HTTP client type */
-export type HttpClientType =
-  | 'axios'
-  | 'fetch'
-  | 'got'
-  | 'node-fetch'
-  | 'undici'
-  | 'custom'
-  | 'generic';
-
 /**
- * Custom error extractor interface
- * Allows users to register extractors for custom HTTP clients
- */
-export interface ErrorExtractor {
-  /** Unique name for this extractor (used for clientType) */
-  name: string;
-
-  /**
-   * Check if this extractor can handle the given error
-   * Should return true if the error matches this client's error shape
-   */
-  canHandle(error: unknown): boolean;
-
-  /**
-   * Extract standardized error from the client-specific error
-   * Only called if canHandle() returned true
-   */
-  extract(error: unknown): StandardizedError;
-}
-
-/**
- * Standardized error representation across all HTTP clients
+ * Standardized error representation
  */
 export interface StandardizedError {
   /** Original error object */
@@ -226,9 +195,6 @@ export interface StandardizedError {
 
   /** Is this error retryable? */
   isRetryable: boolean;
-
-  /** Detected HTTP client type */
-  clientType: HttpClientType;
 
   /** Additional metadata */
   metadata?: Record<string, unknown>;

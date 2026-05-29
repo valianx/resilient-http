@@ -1,392 +1,273 @@
-import { describe, it, beforeEach } from 'node:test';
+/**
+ * Tests for error classification primitives (classifyError, isRetryableError)
+ * and the internal message extraction utility (extractMessageFromBody).
+ *
+ * Covers AC-1 through AC-5 of the Phase 3 refactor spec.
+ */
+import { describe, it } from 'node:test';
 import assert from 'node:assert';
-import {
-  extractError,
-  detectClientType,
-  classifyError,
-  isRetryableError,
-  registerExtractor,
-  unregisterExtractor,
-  clearExtractors,
-  getRegisteredExtractors,
-} from '../src/errors/extractor';
+import { classifyError, isRetryableError } from '../src/core/classify';
+import { extractMessageFromBody } from '../src/core/message';
 
-describe('Error Extraction', () => {
-  describe('detectClientType', () => {
-    it('should detect axios errors', () => {
-      const error = { isAxiosError: true };
-      assert.strictEqual(detectClientType(error), 'axios');
-    });
+// ============================================================================
+// classifyError
+// ============================================================================
 
-    it('should detect got errors', () => {
-      const error = { name: 'HTTPError' };
-      assert.strictEqual(detectClientType(error), 'got');
-    });
+describe('classifyError', () => {
+  it('classifies ETIMEDOUT as timeout', () => {
+    assert.strictEqual(classifyError(undefined, 'ETIMEDOUT'), 'timeout');
+  });
 
-    it('should detect fetch errors', () => {
-      const error = { name: 'TypeError', message: 'Failed to fetch' };
-      assert.strictEqual(detectClientType(error), 'fetch');
-    });
+  it('classifies ECONNABORTED as timeout', () => {
+    assert.strictEqual(classifyError(undefined, 'ECONNABORTED'), 'timeout');
+  });
 
-    it('should return generic for unknown errors', () => {
-      const error = { message: 'Unknown error' };
-      assert.strictEqual(detectClientType(error), 'generic');
+  it('classifies UND_ERR_CONNECT_TIMEOUT as timeout', () => {
+    assert.strictEqual(classifyError(undefined, 'UND_ERR_CONNECT_TIMEOUT'), 'timeout');
+  });
+
+  it('classifies ECONNREFUSED as network', () => {
+    assert.strictEqual(classifyError(undefined, 'ECONNREFUSED'), 'network');
+  });
+
+  it('classifies ECONNRESET as network', () => {
+    assert.strictEqual(classifyError(undefined, 'ECONNRESET'), 'network');
+  });
+
+  it('classifies ERR_CANCELED as cancelled', () => {
+    assert.strictEqual(classifyError(undefined, 'ERR_CANCELED'), 'cancelled');
+  });
+
+  it('classifies 429 as rate-limit', () => {
+    assert.strictEqual(classifyError(429), 'rate-limit');
+  });
+
+  it('classifies 401 as authentication', () => {
+    assert.strictEqual(classifyError(401), 'authentication');
+  });
+
+  it('classifies 403 as authentication', () => {
+    assert.strictEqual(classifyError(403), 'authentication');
+  });
+
+  it('classifies 404 as not-found — AC-3', () => {
+    assert.strictEqual(classifyError(404), 'not-found');
+  });
+
+  it('classifies 400 as validation', () => {
+    assert.strictEqual(classifyError(400), 'validation');
+  });
+
+  it('classifies 422 as validation', () => {
+    assert.strictEqual(classifyError(422), 'validation');
+  });
+
+  it('classifies 500 as server', () => {
+    assert.strictEqual(classifyError(500), 'server');
+  });
+
+  it('classifies 503 as server — AC-3', () => {
+    assert.strictEqual(classifyError(503), 'server');
+  });
+
+  it('classifies 504 as server', () => {
+    assert.strictEqual(classifyError(504), 'server');
+  });
+
+  it('classifies unknown code+status as unknown', () => {
+    assert.strictEqual(classifyError(undefined, undefined), 'unknown');
+  });
+
+  it('error-code classification takes precedence over status code', () => {
+    // ETIMEDOUT should win over a 500 status
+    assert.strictEqual(classifyError(500, 'ETIMEDOUT'), 'timeout');
+  });
+});
+
+// ============================================================================
+// isRetryableError
+// ============================================================================
+
+describe('isRetryableError', () => {
+  it('network classification is retryable', () => {
+    assert.strictEqual(isRetryableError('network'), true);
+  });
+
+  it('timeout classification is retryable', () => {
+    assert.strictEqual(isRetryableError('timeout'), true);
+  });
+
+  it('server classification is retryable — AC-3', () => {
+    assert.strictEqual(isRetryableError('server'), true);
+  });
+
+  it('rate-limit classification is retryable', () => {
+    assert.strictEqual(isRetryableError('rate-limit'), true);
+  });
+
+  it('client classification is NOT retryable', () => {
+    assert.strictEqual(isRetryableError('client'), false);
+  });
+
+  it('authentication classification is NOT retryable', () => {
+    assert.strictEqual(isRetryableError('authentication'), false);
+  });
+
+  it('not-found classification is NOT retryable — AC-3', () => {
+    assert.strictEqual(isRetryableError('not-found'), false);
+  });
+
+  it('validation classification is NOT retryable', () => {
+    assert.strictEqual(isRetryableError('validation'), false);
+  });
+
+  it('cancelled classification is NOT retryable', () => {
+    assert.strictEqual(isRetryableError('cancelled'), false);
+  });
+
+  it('unknown classification is NOT retryable', () => {
+    assert.strictEqual(isRetryableError('unknown'), false);
+  });
+
+  it('retryable status code 503 overrides non-retryable classification', () => {
+    // Even if classified as 'client', explicit status in RETRYABLE_STATUS_CODES wins
+    assert.strictEqual(isRetryableError('client', 503), true);
+  });
+
+  it('retryable status code 429 with rate-limit classification stays retryable', () => {
+    assert.strictEqual(isRetryableError('rate-limit', 429), true);
+  });
+
+  it('status 409 is NOT retryable (not in RETRYABLE_STATUS_CODES)', () => {
+    // 409 is intentionally excluded per v2 spec
+    assert.strictEqual(isRetryableError('client', 409), false);
+  });
+});
+
+// ============================================================================
+// extractMessageFromBody — AC-1, AC-2
+// ============================================================================
+
+describe('extractMessageFromBody', () => {
+  // --- RFC 7807 problem+json ---
+
+  it('returns detail from problem+json body — AC-2', () => {
+    const body = { type: 'https://example.com/errors/not-found', title: 'Not Found', detail: 'The resource was not found.', status: 404 };
+    const result = extractMessageFromBody(body, 'application/problem+json');
+    assert.strictEqual(result, 'The resource was not found.');
+  });
+
+  it('returns title when detail is absent in problem+json — AC-2', () => {
+    const body = { type: 'https://example.com/errors/conflict', title: 'Conflict', status: 409 };
+    const result = extractMessageFromBody(body, 'application/problem+json');
+    assert.strictEqual(result, 'Conflict');
+  });
+
+  it('returns detail over title even when both present in problem+json', () => {
+    const body = { title: 'Bad Request', detail: 'Field x is required', status: 400 };
+    const result = extractMessageFromBody(body, 'application/problem+json');
+    assert.strictEqual(result, 'Field x is required');
+  });
+
+  it('parses a JSON string body with problem+json content-type', () => {
+    const body = JSON.stringify({ title: 'Service Unavailable', detail: 'Try again later', status: 503 });
+    const result = extractMessageFromBody(body, 'application/problem+json');
+    assert.strictEqual(result, 'Try again later');
+  });
+
+  // --- Generic JSON object bodies ---
+
+  it('returns message field from plain JSON object', () => {
+    const body = { message: 'Internal Server Error' };
+    const result = extractMessageFromBody(body);
+    assert.strictEqual(result, 'Internal Server Error');
+  });
+
+  it('returns error field when message is absent', () => {
+    const body = { error: 'Something went wrong' };
+    const result = extractMessageFromBody(body);
+    assert.strictEqual(result, 'Something went wrong');
+  });
+
+  it('returns msg field as fallback', () => {
+    const body = { msg: 'Request failed' };
+    const result = extractMessageFromBody(body);
+    assert.strictEqual(result, 'Request failed');
+  });
+
+  it('returns detail field from generic JSON (no problem+json ct)', () => {
+    const body = { detail: 'Validation failed for field email' };
+    const result = extractMessageFromBody(body);
+    assert.strictEqual(result, 'Validation failed for field email');
+  });
+
+  it('returns message from nested error object', () => {
+    const body = { error: { message: 'Nested error message' } };
+    const result = extractMessageFromBody(body);
+    assert.strictEqual(result, 'Nested error message');
+  });
+
+  // --- String bodies ---
+
+  it('returns plain string body as-is', () => {
+    const result = extractMessageFromBody('Service temporarily unavailable');
+    assert.strictEqual(result, 'Service temporarily unavailable');
+  });
+
+  it('parses JSON string when content-type is application/json', () => {
+    const body = JSON.stringify({ message: 'Parsed from JSON string' });
+    const result = extractMessageFromBody(body, 'application/json');
+    assert.strictEqual(result, 'Parsed from JSON string');
+  });
+
+  it('returns raw string when content-type is not JSON and string is not parseable', () => {
+    const result = extractMessageFromBody('plain text error', 'text/plain');
+    assert.strictEqual(result, 'plain text error');
+  });
+
+  // --- Null / empty / edge cases ---
+
+  it('returns undefined for null body', () => {
+    assert.strictEqual(extractMessageFromBody(null), undefined);
+  });
+
+  it('returns undefined for undefined body', () => {
+    assert.strictEqual(extractMessageFromBody(undefined), undefined);
+  });
+
+  it('returns undefined for empty string', () => {
+    assert.strictEqual(extractMessageFromBody(''), undefined);
+  });
+
+  it('returns undefined for array body', () => {
+    // Arrays are not message-extractable
+    assert.strictEqual(extractMessageFromBody([{ message: 'should not extract' }]), undefined);
+  });
+
+  it('returns undefined for object with no recognizable fields', () => {
+    const result = extractMessageFromBody({ foo: 'bar', baz: 42 });
+    assert.strictEqual(result, undefined);
+  });
+
+  // --- Guardrail: malformed body must degrade gracefully, never throw ---
+
+  it('does not throw when JSON string is malformed with application/json content-type -- degrades to raw string', () => {
+    // The try/catch in extractFromJsonString must absorb the SyntaxError from JSON.parse
+    const malformed = '{"message": "truncated';
+    assert.doesNotThrow(() => {
+      const result = extractMessageFromBody(malformed, 'application/json');
+      // Falls back to raw string because JSON.parse threw
+      assert.strictEqual(result, malformed);
     });
   });
 
-  describe('classifyError', () => {
-    it('should classify timeout errors', () => {
-      assert.strictEqual(classifyError(undefined, 'ETIMEDOUT'), 'timeout');
-      assert.strictEqual(classifyError(undefined, 'ECONNABORTED'), 'timeout');
-    });
-
-    it('should classify network errors', () => {
-      assert.strictEqual(classifyError(undefined, 'ECONNREFUSED'), 'network');
-      assert.strictEqual(classifyError(undefined, 'ECONNRESET'), 'network');
-    });
-
-    it('should classify server errors by status', () => {
-      assert.strictEqual(classifyError(500), 'server');
-      assert.strictEqual(classifyError(503), 'server');
-    });
-
-    it('should classify rate limit errors', () => {
-      assert.strictEqual(classifyError(429), 'rate-limit');
-    });
-
-    it('should classify auth errors', () => {
-      assert.strictEqual(classifyError(401), 'authentication');
-      assert.strictEqual(classifyError(403), 'authentication');
-    });
-
-    it('should classify not-found errors', () => {
-      assert.strictEqual(classifyError(404), 'not-found');
-    });
-  });
-
-  describe('isRetryableError', () => {
-    it('should consider network errors retryable', () => {
-      assert.strictEqual(isRetryableError('network'), true);
-    });
-
-    it('should consider timeout errors retryable', () => {
-      assert.strictEqual(isRetryableError('timeout'), true);
-    });
-
-    it('should consider server errors retryable', () => {
-      assert.strictEqual(isRetryableError('server'), true);
-    });
-
-    it('should not consider client errors retryable', () => {
-      assert.strictEqual(isRetryableError('client'), false);
-    });
-
-    it('should not consider auth errors retryable', () => {
-      assert.strictEqual(isRetryableError('authentication'), false);
-    });
-  });
-
-  describe('extractError', () => {
-    it('should extract axios response error', () => {
-      const error = {
-        isAxiosError: true,
-        message: 'Request failed',
-        response: {
-          status: 500,
-          data: { message: 'Internal Server Error' },
-        },
-        config: {
-          url: '/api/test',
-          method: 'get',
-        },
-      };
-
-      const result = extractError(error);
-
-      assert.strictEqual(result.statusCode, 500);
-      assert.strictEqual(result.message, 'Internal Server Error');
-      assert.strictEqual(result.classification, 'server');
-      assert.strictEqual(result.isRetryable, true);
-      assert.strictEqual(result.clientType, 'axios');
-    });
-
-    it('should extract axios network error', () => {
-      const error = {
-        isAxiosError: true,
-        message: 'Network Error',
-        request: {},
-        code: 'ECONNREFUSED',
-        config: {
-          url: '/api/test',
-          method: 'get',
-        },
-      };
-
-      const result = extractError(error);
-
-      assert.strictEqual(result.statusCode, 503);
-      assert.strictEqual(result.classification, 'network');
-      assert.strictEqual(result.isRetryable, true);
-    });
-
-    it('should extract generic error', () => {
-      const error = new Error('Something went wrong');
-
-      const result = extractError(error);
-
-      assert.strictEqual(result.message, 'Something went wrong');
-      assert.strictEqual(result.clientType, 'generic');
-    });
-
-    it('should handle primitive errors', () => {
-      const result = extractError('String error');
-      assert.strictEqual(result.message, 'String error');
-    });
-  });
-
-  describe('Custom Extractors', () => {
-    // Clear extractors before each test to ensure isolation
-    beforeEach(() => {
-      clearExtractors();
-    });
-
-    it('should register a custom extractor', () => {
-      registerExtractor({
-        name: 'test-client',
-        canHandle: (error) => {
-          return typeof error === 'object' && error !== null && 'isTestError' in error;
-        },
-        extract: (error) => {
-          const e = error as { isTestError: boolean; message: string; code: number };
-          return {
-            originalError: error,
-            message: e.message,
-            statusCode: e.code,
-            classification: 'server',
-            isRetryable: true,
-            clientType: 'custom',
-          };
-        },
-      });
-
-      assert.deepStrictEqual(getRegisteredExtractors(), ['test-client']);
-    });
-
-    it('should use custom extractor when it can handle the error', () => {
-      registerExtractor({
-        name: 'my-client',
-        canHandle: (error) => {
-          return typeof error === 'object' && error !== null && 'isMyClientError' in error;
-        },
-        extract: (error) => {
-          const e = error as { isMyClientError: boolean; statusCode: number; msg: string };
-          const classification = classifyError(e.statusCode);
-          return {
-            originalError: error,
-            message: e.msg,
-            statusCode: e.statusCode,
-            classification,
-            isRetryable: isRetryableError(classification, e.statusCode),
-            clientType: 'custom',
-          };
-        },
-      });
-
-      const customError = {
-        isMyClientError: true,
-        statusCode: 503,
-        msg: 'Service temporarily unavailable',
-      };
-
-      const result = extractError(customError);
-
-      assert.strictEqual(result.message, 'Service temporarily unavailable');
-      assert.strictEqual(result.statusCode, 503);
-      assert.strictEqual(result.classification, 'server');
-      assert.strictEqual(result.isRetryable, true);
-      assert.strictEqual(result.clientType, 'custom');
-    });
-
-    it('should fall back to built-in extractors when custom cannot handle', () => {
-      registerExtractor({
-        name: 'specific-client',
-        canHandle: (error) => {
-          return typeof error === 'object' && error !== null && 'isSpecificError' in error;
-        },
-        extract: () => ({
-          originalError: null,
-          message: 'Should not be called',
-          classification: 'unknown',
-          isRetryable: false,
-          clientType: 'custom',
-        }),
-      });
-
-      // This is an axios error, not a specific-client error
-      const axiosError = {
-        isAxiosError: true,
-        message: 'Axios error',
-        response: { status: 500 },
-        config: {},
-      };
-
-      const result = extractError(axiosError);
-
-      assert.strictEqual(result.clientType, 'axios');
-      assert.strictEqual(result.statusCode, 500);
-    });
-
-    it('should check custom extractors in registration order', () => {
-      const order: string[] = [];
-
-      registerExtractor({
-        name: 'first',
-        canHandle: (error) => {
-          order.push('first');
-          return typeof error === 'object' && error !== null && 'useFirst' in error;
-        },
-        extract: (error) => ({
-          originalError: error,
-          message: 'First extractor',
-          classification: 'unknown',
-          isRetryable: false,
-          clientType: 'custom',
-        }),
-      });
-
-      registerExtractor({
-        name: 'second',
-        canHandle: (error) => {
-          order.push('second');
-          return typeof error === 'object' && error !== null && 'useSecond' in error;
-        },
-        extract: (error) => ({
-          originalError: error,
-          message: 'Second extractor',
-          classification: 'unknown',
-          isRetryable: false,
-          clientType: 'custom',
-        }),
-      });
-
-      extractError({ useSecond: true });
-
-      assert.deepStrictEqual(order, ['first', 'second']);
-    });
-
-    it('should throw when registering duplicate extractor name', () => {
-      registerExtractor({
-        name: 'duplicate',
-        canHandle: () => false,
-        extract: () => ({
-          originalError: null,
-          message: '',
-          classification: 'unknown',
-          isRetryable: false,
-          clientType: 'custom',
-        }),
-      });
-
-      assert.throws(() => {
-        registerExtractor({
-          name: 'duplicate',
-          canHandle: () => false,
-          extract: () => ({
-            originalError: null,
-            message: '',
-            classification: 'unknown',
-            isRetryable: false,
-            clientType: 'custom',
-          }),
-        });
-      }, /already registered/);
-    });
-
-    it('should unregister an extractor', () => {
-      registerExtractor({
-        name: 'to-remove',
-        canHandle: () => false,
-        extract: () => ({
-          originalError: null,
-          message: '',
-          classification: 'unknown',
-          isRetryable: false,
-          clientType: 'custom',
-        }),
-      });
-
-      assert.deepStrictEqual(getRegisteredExtractors(), ['to-remove']);
-
-      const removed = unregisterExtractor('to-remove');
-      assert.strictEqual(removed, true);
-      assert.deepStrictEqual(getRegisteredExtractors(), []);
-    });
-
-    it('should return false when unregistering non-existent extractor', () => {
-      const removed = unregisterExtractor('non-existent');
-      assert.strictEqual(removed, false);
-    });
-
-    it('should clear all extractors', () => {
-      registerExtractor({
-        name: 'one',
-        canHandle: () => false,
-        extract: () => ({
-          originalError: null,
-          message: '',
-          classification: 'unknown',
-          isRetryable: false,
-          clientType: 'custom',
-        }),
-      });
-
-      registerExtractor({
-        name: 'two',
-        canHandle: () => false,
-        extract: () => ({
-          originalError: null,
-          message: '',
-          classification: 'unknown',
-          isRetryable: false,
-          clientType: 'custom',
-        }),
-      });
-
-      assert.strictEqual(getRegisteredExtractors().length, 2);
-
-      clearExtractors();
-
-      assert.strictEqual(getRegisteredExtractors().length, 0);
-    });
-
-    it('should allow custom extractor to override built-in detection', () => {
-      // Register a custom extractor that intercepts axios errors
-      registerExtractor({
-        name: 'axios-override',
-        canHandle: (error) => {
-          return typeof error === 'object' && error !== null && 'isAxiosError' in error;
-        },
-        extract: (error) => ({
-          originalError: error,
-          message: 'Custom axios handling',
-          classification: 'network',
-          isRetryable: false, // Override: not retryable
-          clientType: 'custom',
-        }),
-      });
-
-      const axiosError = {
-        isAxiosError: true,
-        message: 'Original message',
-        response: { status: 500 },
-        config: {},
-      };
-
-      const result = extractError(axiosError);
-
-      assert.strictEqual(result.message, 'Custom axios handling');
-      assert.strictEqual(result.isRetryable, false);
-      assert.strictEqual(result.clientType, 'custom');
+  it('does not throw when body is an HTML string with application/problem+json content-type -- degrades to raw string', () => {
+    // Proxy/gateway error pages often return HTML with a JSON content-type header
+    const html = '<html><body><h1>503 Service Unavailable</h1></body></html>';
+    assert.doesNotThrow(() => {
+      const result = extractMessageFromBody(html, 'application/problem+json');
+      // JSON.parse fails; falls back to raw string
+      assert.strictEqual(result, html);
     });
   });
 });

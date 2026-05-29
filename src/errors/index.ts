@@ -1,12 +1,8 @@
+// Error classification primitives — re-exported from core for the public ./errors sub-path.
+// extractMessageFromBody is intentionally NOT re-exported here; it is internal to src/.
 export {
-  detectClientType,
+  RETRYABLE_NETWORK_CODES,
+  RETRYABLE_STATUS_CODES,
   classifyError,
   isRetryableError,
-  extractError,
-  createErrorPredicate,
-  defaultRetryPredicate,
-  registerExtractor,
-  unregisterExtractor,
-  clearExtractors,
-  getRegisteredExtractors,
-} from './extractor';
+} from '../core/classify';
