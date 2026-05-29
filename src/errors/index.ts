@@ -1,4 +1,4 @@
-// Error classification primitives — re-exported from core for the public ./errors sub-path.
+// Error classification primitives — internal re-export from core (no public sub-path).
 // extractMessageFromBody is intentionally NOT re-exported here; it is internal to src/.
 export {
   RETRYABLE_NETWORK_CODES,
