@@ -30,7 +30,13 @@ let _ctx: TestContext | undefined;
 
 /** True when running under Node.js node:test with mock.timers support. */
 function isMockTimersAvailable(): boolean {
-  return typeof _ctx?.mock?.timers?.enable === 'function';
+  try {
+    // Bun's node:test shim throws when accessing mock.timers (property getter
+    // raises "timers mock is not supported" — cannot be silenced with ?.).
+    return typeof _ctx?.mock?.timers?.enable === 'function';
+  } catch {
+    return false;
+  }
 }
 
 /**
