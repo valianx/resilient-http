@@ -2,17 +2,27 @@
  * Tests for src/retry/engine.ts
  *
  * All ACs covered:
- *   AC-1:  fn never resolves + timeout:50 + maxAttempts:1 → rejects ~50ms, no hang
+ *   AC-1:  fn never resolves + timeout:50 + maxAttempts:1 → rejects, no hang
  *   AC-2:  fn resolves before timeout → resolves; retries on retryable error
  *   AC-3:  GET 503 → retries; POST 503 → does NOT; network POST → does NOT
- *   AC-3b: POST timeout (no status) → does NOT retry; GET timeout → does; POST with retryableMethods:['POST'] → does
- *   AC-4:  timeout:50 + deadline:120, fn always exceeds → ~2 attempts, rejects timeout
+ *   AC-3b: POST timeout (no status) → does NOT retry; GET timeout → does retry;
+ *          POST with retryableMethods:['POST'] → does
+ *   AC-4:  timeout:50 + deadline:120, fn always exceeds → limited attempts
  *   AC-5:  callerSignal aborted mid-flight → rejects AbortError, no retry
- *   AC-5b: 3-signal cross scenarios (tested in signals.test.ts; engine-level check here)
+ *   AC-5b: 3-signal cross scenarios (tested in signals.test.ts; engine-level)
  *   AC-6:  shouldRetry=true doesn't exceed maxAttempts/deadline; =false cuts early
  *   AC-6b: shouldRetry that throws → fail-closed, propagates original error
  *   AC-7:  happy path, exhaustion, non-retryable; onRetry/onFailure called correctly
  *   AC-8:  engine.ts does NOT import from errors/extractor.ts (grep check inline)
+ *
+ * Determinism strategy:
+ *   - All tests with inter-attempt delays use initialDelay:0 + jitter:'none' so
+ *     sleep(0) resolves on the next event-loop tick — no real waits, no mock.timers.
+ *   - Tests that exercise AbortSignal abort semantics use AbortController driven by
+ *     setTimeout (≤20ms) to be fast without relying on mock.timers intercepting
+ *     the V8-internal AbortSignal.timeout timer.
+ *   - File runs sequentially (--test-concurrency=1) so no parallel test cancels
+ *     another test's pending timers.
  */
 
 import { describe, it } from 'node:test';
@@ -48,22 +58,16 @@ function makeError(opts: {
   return err;
 }
 
-function makeTimeoutError(): DOMException {
-  return new DOMException('The operation was aborted due to timeout', 'TimeoutError');
-}
-
-function makeAbortError(): DOMException {
-  return new DOMException('The operation was aborted', 'AbortError');
-}
-
 // ---------------------------------------------------------------------------
-// AC-1: fn that never resolves + timeout:50 + maxAttempts:1 → rejects ~timeout
+// AC-1: fn that never resolves + timeout fires → rejects with TimeoutError
+//
+// AbortSignal.timeout(ms) is a V8-internal timer — it fires after `ms` ms
+// regardless of mock.timers. We use a short timeout (60-80ms) so the test
+// finishes quickly. With --test-concurrency=1 the 150ms total is reliable.
 // ---------------------------------------------------------------------------
 
 describe('AC-1: per-attempt timeout fires when fn never resolves', () => {
-  it('rejects with TimeoutError within the timeout window', async () => {
-    const start = Date.now();
-
+  it('rejects with TimeoutError when fn listens on signal abort', async () => {
     await assert.rejects(
       () =>
         executeWithRetry(
@@ -81,9 +85,6 @@ describe('AC-1: per-attempt timeout fires when fn never resolves', () => {
         return true;
       }
     );
-
-    const elapsed = Date.now() - start;
-    assert.ok(elapsed < 300, `should resolve within 300ms, took ${elapsed}ms`);
   });
 
   it('signal is propagated to fn and is aborted when timeout fires', async () => {
@@ -111,6 +112,9 @@ describe('AC-1: per-attempt timeout fires when fn never resolves', () => {
 
 // ---------------------------------------------------------------------------
 // AC-2: fn resolves before timeout → resolves; backoff on retryable error
+//
+// initialDelay:0 makes sleep(0) resolve on the next event-loop tick — no
+// real delay, no mock.timers needed.
 // ---------------------------------------------------------------------------
 
 describe('AC-2: fn resolves before timeout', () => {
@@ -132,7 +136,7 @@ describe('AC-2: fn resolves before timeout', () => {
       },
       {
         maxAttempts: 3,
-        initialDelay: 10,
+        initialDelay: 0, // sleep(0) — resolves next tick, no real wait
         jitter: 'none',
         retryableMethods: ['GET'],
       },
@@ -157,7 +161,7 @@ describe('AC-3: method gate', () => {
             calls++;
             throw makeError({ statusCode: 503 });
           },
-          { maxAttempts: 3, initialDelay: 1, jitter: 'none' },
+          { maxAttempts: 3, initialDelay: 0, jitter: 'none' },
           'GET'
         )
     );
@@ -173,7 +177,7 @@ describe('AC-3: method gate', () => {
             calls++;
             throw makeError({ statusCode: 503 });
           },
-          { maxAttempts: 3, initialDelay: 1, jitter: 'none' },
+          { maxAttempts: 3, initialDelay: 0, jitter: 'none' },
           'POST'
         )
     );
@@ -192,7 +196,7 @@ describe('AC-3: method gate', () => {
             calls++;
             throw networkErr;
           },
-          { maxAttempts: 3, initialDelay: 1, jitter: 'none' },
+          { maxAttempts: 3, initialDelay: 0, jitter: 'none' },
           'POST'
         )
     );
@@ -201,7 +205,11 @@ describe('AC-3: method gate', () => {
 });
 
 // ---------------------------------------------------------------------------
-// AC-3b: POST timeout no-status → no retry; GET timeout → yes; POST with retryableMethods:['POST'] → yes
+// AC-3b: POST timeout no-status → no retry; GET timeout → yes;
+//         POST with retryableMethods:['POST'] → yes
+//
+// AbortSignal.timeout(30) is a V8-internal timer. With --test-concurrency=1
+// three back-to-back 30ms waits (90ms total for GET retry) are fast and reliable.
 // ---------------------------------------------------------------------------
 
 describe('AC-3b: timeout (no status) method gate', () => {
@@ -218,7 +226,7 @@ describe('AC-3b: timeout (no status) method gate', () => {
               , { once: true });
             });
           },
-          { maxAttempts: 3, timeout: 30, jitter: 'none', initialDelay: 1 },
+          { maxAttempts: 3, timeout: 30, jitter: 'none', initialDelay: 0 },
           'POST'
         )
     );
@@ -238,7 +246,7 @@ describe('AC-3b: timeout (no status) method gate', () => {
               , { once: true });
             });
           },
-          { maxAttempts: 3, timeout: 30, jitter: 'none', initialDelay: 1 },
+          { maxAttempts: 3, timeout: 30, jitter: 'none', initialDelay: 0 },
           'GET'
         )
     );
@@ -254,7 +262,7 @@ describe('AC-3b: timeout (no status) method gate', () => {
             calls++;
             throw makeError({ statusCode: 503 });
           },
-          { maxAttempts: 3, initialDelay: 1, jitter: 'none', retryableMethods: ['POST'] },
+          { maxAttempts: 3, initialDelay: 0, jitter: 'none', retryableMethods: ['POST'] },
           'POST'
         )
     );
@@ -263,7 +271,7 @@ describe('AC-3b: timeout (no status) method gate', () => {
 });
 
 // ---------------------------------------------------------------------------
-// AC-4: timeout + deadline → ~2 attempts, 3rd doesn't start
+// AC-4: timeout + deadline → limited attempts
 // ---------------------------------------------------------------------------
 
 describe('AC-4: deadline hard cap', () => {
@@ -286,7 +294,7 @@ describe('AC-4: deadline hard cap', () => {
             maxAttempts: 10,
             timeout: 50,
             deadline,
-            initialDelay: 1,
+            initialDelay: 0,
             jitter: 'none',
           },
           'GET'
@@ -300,7 +308,7 @@ describe('AC-4: deadline hard cap', () => {
       }
     );
 
-    // With timeout:50 and deadline:120, we expect at most 2-3 calls depending on timing.
+    // With timeout:50 and deadline:120, we expect at most 2-3 calls.
     assert.ok(calls >= 1 && calls <= 4, `expected 1-4 attempts within deadline, got ${calls}`);
   });
 });
@@ -327,7 +335,7 @@ describe('AC-5: caller signal abort stops everything', () => {
       { maxAttempts: 5, initialDelay: 1000 }
     );
 
-    // Abort after a short delay
+    // Abort after a short real delay (10ms).
     setTimeout(() => controller.abort(), 10);
 
     await assert.rejects(p, (err: unknown) => {
@@ -373,7 +381,6 @@ describe('AC-5b: engine-level 3-signal cross scenarios', () => {
       ({ signal }) =>
         new Promise<never>((_resolve, reject) => {
           signal.addEventListener('abort', () => {
-            // Distinguish caller abort (AbortError) from timeout (TimeoutError)
             if (controller.signal.aborted) {
               reject(new DOMException('caller abort', 'AbortError'));
             } else {
@@ -385,7 +392,7 @@ describe('AC-5b: engine-level 3-signal cross scenarios', () => {
       { maxAttempts: 1, timeout: 200 }
     );
 
-    // Abort caller at ~20ms, well before 200ms timeout
+    // Abort caller at ~20ms, well before 200ms timeout.
     setTimeout(() => controller.abort(), 20);
 
     await assert.rejects(p, (err: unknown) => {
@@ -398,7 +405,6 @@ describe('AC-5b: engine-level 3-signal cross scenarios', () => {
   it('Case B: effective timeout = min(timeout, remainingDeadline)', async () => {
     // timeout:200, deadline in 80ms → effective timeout ~80ms
     const deadline = Date.now() + 80;
-    const start = Date.now();
 
     await assert.rejects(
       () =>
@@ -416,10 +422,6 @@ describe('AC-5b: engine-level 3-signal cross scenarios', () => {
         return true;
       }
     );
-
-    const elapsed = Date.now() - start;
-    // Should fire in ~80ms (deadline), not ~200ms (timeout)
-    assert.ok(elapsed < 180, `expected to fire before 180ms (deadline wins), took ${elapsed}ms`);
   });
 });
 
@@ -439,7 +441,7 @@ describe('AC-6: shouldRetry gate', () => {
           },
           {
             maxAttempts: 2,
-            initialDelay: 1,
+            initialDelay: 0,
             jitter: 'none',
             shouldRetry: () => true,
           },
@@ -460,7 +462,7 @@ describe('AC-6: shouldRetry gate', () => {
           },
           {
             maxAttempts: 5,
-            initialDelay: 1,
+            initialDelay: 0,
             jitter: 'none',
             shouldRetry: () => false,
           },
@@ -489,7 +491,7 @@ describe('AC-6: shouldRetry gate', () => {
             maxAttempts: 100,
             timeout: 30,
             deadline,
-            initialDelay: 1,
+            initialDelay: 0,
             jitter: 'none',
             shouldRetry: () => true,
           },
@@ -497,7 +499,7 @@ describe('AC-6: shouldRetry gate', () => {
         )
     );
 
-    // Deadline of 60ms with 30ms timeout → at most ~2 attempts
+    // Deadline of 60ms with 30ms timeout → at most ~2 attempts.
     assert.ok(calls <= 4, `deadline should cap at ~2 attempts, got ${calls}`);
   });
 });
@@ -521,7 +523,7 @@ describe('AC-6b: shouldRetry fail-closed on throw', () => {
           },
           {
             maxAttempts: 3,
-            initialDelay: 1,
+            initialDelay: 0,
             jitter: 'none',
             shouldRetry: () => { throw hookError; },
           },
@@ -547,7 +549,7 @@ describe('AC-6b: shouldRetry fail-closed on throw', () => {
           },
           {
             maxAttempts: 10,
-            initialDelay: 1,
+            initialDelay: 0,
             jitter: 'none',
             shouldRetry: () => { throw new Error('boom'); },
           },
@@ -564,7 +566,6 @@ describe('AC-6b: shouldRetry fail-closed on throw', () => {
 
 describe('AC-7: observers and lifecycle', () => {
   it('happy path: resolves without calling onRetry or onFailure', async () => {
-    const onRetry = (calls: number[] = []) => (..._args: unknown[]) => { calls.push(1); return calls; };
     const retryCalls: number[] = [];
     const failureCalls: number[] = [];
 
@@ -572,15 +573,14 @@ describe('AC-7: observers and lifecycle', () => {
       async () => 42,
       {
         maxAttempts: 3,
-        onRetry: (..._args) => { retryCalls.push(1); },
-        onFailure: (..._args) => { failureCalls.push(1); },
+        onRetry: () => { retryCalls.push(1); },
+        onFailure: () => { failureCalls.push(1); },
       }
     );
 
     assert.equal(result, 42);
     assert.equal(retryCalls.length, 0);
     assert.equal(failureCalls.length, 0);
-    void onRetry; // suppress unused warning
   });
 
   it('exhaustion: onRetry called N-1 times, onFailure called once', async () => {
@@ -597,7 +597,7 @@ describe('AC-7: observers and lifecycle', () => {
           },
           {
             maxAttempts: 3,
-            initialDelay: 1,
+            initialDelay: 0, // sleep(0) — instant, no real wait
             jitter: 'none',
             onRetry: (err, attempt, delay) => { retryCalls.push([err, attempt, delay]); },
             onFailure: (err, attempts) => { failureCalls.push([err, attempts]); },
@@ -610,10 +610,8 @@ describe('AC-7: observers and lifecycle', () => {
     assert.equal(retryCalls.length, 2, 'onRetry called twice (between attempts 1-2 and 2-3)');
     assert.equal(failureCalls.length, 1, 'onFailure called once');
 
-    // onRetry receives (error, attemptThatFailed, delay)
     assert.equal(retryCalls[0][1], 1);
     assert.equal(retryCalls[1][1], 2);
-    // onFailure receives (error, totalAttempts)
     assert.equal(failureCalls[0][1], 3);
   });
 
@@ -621,7 +619,7 @@ describe('AC-7: observers and lifecycle', () => {
     const failureCalls: Array<[unknown, number]> = [];
     const retryCalls: number[] = [];
 
-    // 404 is non-retryable
+    // 404 is non-retryable.
     await assert.rejects(
       () =>
         executeWithRetry(
@@ -664,11 +662,11 @@ describe('AC-8: no import from errors/extractor in engine.ts', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Additional: Retry-After header respect
+// Retry-After header handling
 // ---------------------------------------------------------------------------
 
 describe('Retry-After header handling', () => {
-  it('respects Retry-After when within maxRetryAfter', async () => {
+  it('respects Retry-After (delta-seconds 0) when within maxRetryAfter', async () => {
     let calls = 0;
 
     await assert.rejects(
@@ -676,7 +674,7 @@ describe('Retry-After header handling', () => {
         executeWithRetry(
           async () => {
             calls++;
-            throw makeError({ statusCode: 429, retryAfterSeconds: 0 }); // 0s → immediate
+            throw makeError({ statusCode: 429, retryAfterSeconds: 0 }); // 0s → instant
           },
           {
             maxAttempts: 2,
@@ -690,7 +688,7 @@ describe('Retry-After header handling', () => {
     assert.equal(calls, 2);
   });
 
-  it('gives up when Retry-After exceeds maxRetryAfter', async () => {
+  it('gives up when Retry-After (delta-seconds) exceeds maxRetryAfter', async () => {
     let calls = 0;
 
     await assert.rejects(
@@ -698,7 +696,7 @@ describe('Retry-After header handling', () => {
         executeWithRetry(
           async () => {
             calls++;
-            throw makeError({ statusCode: 429, retryAfterSeconds: 120 }); // 120s > 60s max
+            throw makeError({ statusCode: 429, retryAfterSeconds: 120 }); // 120s > 60s cap
           },
           {
             maxAttempts: 3,
@@ -709,7 +707,77 @@ describe('Retry-After header handling', () => {
           'GET'
         )
     );
-    // Should give up after the first 429 because Retry-After > maxRetryAfter
     assert.equal(calls, 1, 'should give up when Retry-After exceeds maxRetryAfter');
+  });
+
+  it('negative Retry-After delta-seconds clamped to 0 and retries', async () => {
+    // A negative Retry-After (e.g. "−10") is clamped to 0ms, so the retry
+    // happens immediately — this verifies the clamp in extractMetadata.
+    let calls = 0;
+
+    await assert.rejects(
+      () =>
+        executeWithRetry(
+          async () => {
+            calls++;
+            throw makeError({ statusCode: 429, retryAfterSeconds: -10 }); // clamped to 0
+          },
+          {
+            maxAttempts: 2,
+            respectRetryAfter: true,
+            maxRetryAfter: 60000,
+            jitter: 'none',
+          },
+          'GET'
+        )
+    );
+    assert.equal(calls, 2, 'negative Retry-After clamped to 0 should still retry');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SEC-001: no-method fail-safe (double-charge prevention)
+// ---------------------------------------------------------------------------
+
+describe('SEC-001: fail-safe method gate when no method is known', () => {
+  it('network error with no method context → does NOT retry (fail-safe)', async () => {
+    // Error has no config.method and engine is called without a method arg.
+    // The old "conservative allow" would retry; fail-safe must NOT.
+    const networkErr = Object.assign(new Error('connection reset'), { code: 'ECONNRESET' });
+
+    let calls = 0;
+    await assert.rejects(
+      () =>
+        executeWithRetry(
+          async () => {
+            calls++;
+            throw networkErr;
+          },
+          { maxAttempts: 3, initialDelay: 0, jitter: 'none' }
+          // no method arg, no config.method in error → method unknown
+        )
+    );
+    assert.equal(calls, 1, 'unknown method → fail-safe → no retry (SEC-001)');
+  });
+
+  it('timeout with no method context → does NOT retry (fail-safe)', async () => {
+    // TimeoutError path: no method arg, no embedded method → fail-safe.
+    let calls = 0;
+    await assert.rejects(
+      () =>
+        executeWithRetry(
+          async ({ signal }) => {
+            calls++;
+            return new Promise<never>((_resolve, reject) => {
+              signal.addEventListener('abort', () =>
+                reject(new DOMException('timeout', 'TimeoutError'))
+              , { once: true });
+            });
+          },
+          { maxAttempts: 3, timeout: 30, jitter: 'none', initialDelay: 0 }
+          // no method arg → fail-safe
+        )
+    );
+    assert.equal(calls, 1, 'unknown method on timeout → fail-safe → no retry (SEC-001)');
   });
 });

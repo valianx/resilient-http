@@ -119,7 +119,17 @@ function extractMetadata(error: unknown): ErrorMetadata {
       const ra = headers['retry-after'] ?? headers['Retry-After'];
       if (ra) {
         const seconds = Number(ra);
-        retryAfterMs = Number.isFinite(seconds) ? seconds * 1000 : undefined;
+        if (Number.isFinite(seconds)) {
+          // Delta-seconds format (RFC 9110 §10.2.4): clamp negatives to 0.
+          retryAfterMs = Math.max(0, seconds * 1000);
+        } else {
+          // HTTP-date format (RFC 9110 §10.2.4): parse absolute date.
+          // A hostile far-future date is capped by maxRetryAfter downstream.
+          const when = Date.parse(ra);
+          retryAfterMs = Number.isFinite(when)
+            ? Math.max(0, when - Date.now())
+            : undefined;
+        }
       }
     }
   }
@@ -162,9 +172,11 @@ function classifyAttemptError(
   // TimeoutError from AbortSignal.timeout() — retryable only if method allows.
   if (error instanceof DOMException && error.name === 'TimeoutError') {
     const effectiveMethod = method ?? meta.method;
+    // fix(sec): fail-safe default — no method info means we cannot confirm
+    // idempotency, so we do NOT retry to prevent double-charge on payments.
     const methodAllowed = effectiveMethod
       ? config.retryableMethods.has(effectiveMethod.toUpperCase())
-      : true; // no method info → allow (conservative)
+      : false;
     return { isRetryable: methodAllowed, classification: 'timeout' };
   }
 
@@ -182,9 +194,11 @@ function classifyAttemptError(
   // Gate 3: method must be in the retryable set when a status is present.
   // Network errors (no status) also require the method gate.
   const effectiveMethod = method ?? meta.method;
+  // fix(sec): fail-safe default — no method info means we cannot confirm
+  // idempotency, so we do NOT retry to prevent double-charge on payments.
   const methodAllowed = effectiveMethod
     ? config.retryableMethods.has(effectiveMethod.toUpperCase())
-    : true; // no method context → conservative allow
+    : false;
 
   const retryable =
     (meta.statusCode !== undefined ? statusRetryable : classificationRetryable) &&

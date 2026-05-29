@@ -59,7 +59,7 @@
     "build": "tsup",
     "dev": "tsup --watch",
     "test": "bun test",
-    "test:node": "node --import tsx --test tests/*.test.ts",
+    "test:node": "node --import tsx --test-concurrency=1 --test tests/*.test.ts",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src --ext .ts",
     "format": "prettier --write \"src/**/*.ts\"",
