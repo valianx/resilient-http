@@ -16,23 +16,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
       - name: Setup Node.js ${{ matrix.node-version }}
         uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
-          cache: 'yarn'
+          cache: 'pnpm'
 
       - name: Install dependencies
-        run: yarn install --frozen-lockfile
+        run: pnpm install --frozen-lockfile
 
       - name: Type check
-        run: yarn typecheck
+        run: pnpm typecheck
 
       - name: Build
-        run: yarn build
+        run: pnpm build
 
       - name: Test (Node.js)
-        run: yarn test:node
+        run: pnpm test:node
 
   bun:
     runs-on: ubuntu-latest
