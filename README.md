@@ -1,4 +1,4 @@
-# resilient-http
+# Resilient HTTP
 
 A zero-dependency library for resilient HTTP operations with retry logic, circuit breaker, and error extraction.
 
