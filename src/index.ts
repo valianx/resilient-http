@@ -19,6 +19,7 @@ export type {
   RetryHookContext,
   RetryOptions,
   ErrorClassification,
+  ErrorKind,
   StandardizedError,
 } from './types';
 
@@ -44,6 +45,10 @@ export { sleep, sleepWithAbort, randomBetween, randomUpTo, randomFloatBetween } 
 
 // Error classification primitives (public API)
 export { classifyError, isRetryableError } from './errors';
+
+// ResilientHttpError — canonical error class (v2 public API)
+export { ResilientHttpError, isResilientHttpError } from './errors';
+export type { ResilientHttpErrorInit } from './errors';
 
 // NOTE: retry engine (executeWithRetry / executeWithRetryAndSignal) is INTERNAL.
 // It is NOT part of the public API. Use it only from within src/.
