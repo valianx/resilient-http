@@ -26,6 +26,9 @@ export {
   isRetryableError,
 } from './classify';
 
+// Internal message extraction helper (not re-exported from src/index.ts)
+export { extractMessageFromBody } from './message';
+
 // Internal signal composition helpers (not re-exported from src/index.ts)
 export type { AttemptSignalOptions, AttemptSignalResult } from './signals';
 export { buildAttemptSignal, isCallerAbort } from './signals';

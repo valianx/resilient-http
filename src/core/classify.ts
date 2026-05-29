@@ -2,7 +2,7 @@ import type { ErrorClassification } from '../types';
 
 /**
  * Network error codes that indicate retryable failures.
- * Copied from errors/extractor.ts — extractor.ts will be removed in Phase 3.
+ * Migrated here from the removed errors/extractor.ts in Phase 3.
  */
 export const RETRYABLE_NETWORK_CODES = new Set([
   'ECONNRESET',
@@ -34,7 +34,7 @@ export const RETRYABLE_STATUS_CODES = new Set([
 
 /**
  * Classify an error based on its HTTP status code and error code.
- * Copied from errors/extractor.ts — extractor.ts will be removed in Phase 3.
+ * Migrated here from the removed errors/extractor.ts in Phase 3.
  */
 export function classifyError(
   statusCode?: number,
@@ -70,7 +70,7 @@ export function classifyError(
 
 /**
  * Determine if an error is retryable based on its classification and status code.
- * Copied from errors/extractor.ts — extractor.ts will be removed in Phase 3.
+ * Migrated here from the removed errors/extractor.ts in Phase 3.
  */
 export function isRetryableError(
   classification: ErrorClassification,

@@ -39,3 +39,4 @@ coverage/
 .cache/
 # Claude Code session docs
 /session-docs/
+/workspaces/
