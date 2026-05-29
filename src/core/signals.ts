@@ -72,18 +72,34 @@ export function buildAttemptSignal(
     signals.push(callerSignal);
   }
 
-  // AbortSignal.timeout() registers a self-cleaning timer; no manual cleanup.
-  let timeoutSignal: AbortSignal | undefined;
+  // Build the timeout signal using AbortController + setTimeout so that
+  // node:test mock.timers can intercept the timer in tests. AbortSignal.timeout()
+  // uses a V8-internal timer that is not interceptable by mock.timers.
+  let timeoutController: AbortController | undefined;
+  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
   if (effectiveTimeout !== undefined) {
-    timeoutSignal = AbortSignal.timeout(effectiveTimeout);
-    signals.push(timeoutSignal);
+    timeoutController = new AbortController();
+    timeoutHandle = setTimeout(() => {
+      // Abort with a TimeoutError reason — consistent with AbortSignal.timeout().
+      timeoutController!.abort(
+        new DOMException('signal timed out', 'TimeoutError')
+      );
+    }, effectiveTimeout);
+    signals.push(timeoutController.signal);
+  }
+
+  // Cleanup releases the timer to avoid resource leaks.
+  function cleanup() {
+    if (timeoutHandle !== undefined) {
+      clearTimeout(timeoutHandle);
+    }
   }
 
   if (signals.length === 0) {
     // No constraints — return a signal that never aborts.
-    const controller = new AbortController();
+    const neverController = new AbortController();
     return {
-      signal: controller.signal,
+      signal: neverController.signal,
       effectiveTimeout: undefined,
       cleanup: () => { /* nothing to release */ },
     };
@@ -93,7 +109,7 @@ export function buildAttemptSignal(
     return {
       signal: signals[0],
       effectiveTimeout,
-      cleanup: () => { /* AbortSignal.timeout cleans itself */ },
+      cleanup,
     };
   }
 
@@ -101,8 +117,7 @@ export function buildAttemptSignal(
   return {
     signal: composite,
     effectiveTimeout,
-    // AbortSignal.timeout() manages its own timer; no extra cleanup needed.
-    cleanup: () => { /* composite and timeout signal self-manage */ },
+    cleanup,
   };
 }
 
