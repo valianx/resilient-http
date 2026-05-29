@@ -47,8 +47,8 @@ export type RetryCallback = (
 export type FailureCallback = (error: unknown, attempts: number) => void;
 
 /**
- * Minimal hook context passed to `shouldRetry` in Fase 2.
- * Will be extended in Fase 5 with full request/response metadata.
+ * Minimal hook context passed to `shouldRetry` in the retry engine.
+ * The full hook context for Phase 5 hooks is `HookContext`.
  */
 export interface RetryHookContext {
   /** The error thrown by the most recent attempt. */
@@ -61,6 +61,193 @@ export interface RetryHookContext {
   method?: string;
   /** Whether the built-in gate would allow a retry for this error/method/status. */
   gateAllows: boolean;
+}
+
+// ============================================================================
+// Hook System Types (Phase 5)
+// ============================================================================
+
+/**
+ * Mutable request spec carried inside a HookContext.
+ * `onRequest` hooks may mutate any field to alter the outgoing request.
+ */
+export interface HookRequestSpec {
+  /** Target URL (may be mutated by onRequest hooks). */
+  url: string;
+  /** HTTP method, upper-cased (may be mutated by onRequest hooks). */
+  method: string;
+  /**
+   * Request headers. Mutating this object affects the outgoing request.
+   * Use the standard Headers API for CRLF-safe header manipulation.
+   */
+  headers: Record<string, string>;
+  /**
+   * Request body. May be a string, Uint8Array, null, or any serialisable value.
+   * Streams are rejected at request-builder level when retry is active.
+   */
+  body?: unknown;
+}
+
+/**
+ * Full hook context passed to all Phase 5 hooks.
+ *
+ * Lifecycle per logical operation (one call to the resilient client):
+ * - A new HookContext is created once.
+ * - `request` fields are reset per attempt from the original spec.
+ * - `attempt` is 1-based and increments on each retry.
+ * - `attemptId` changes per attempt; `requestId` is stable for the operation.
+ * - `meta` persists across all attempts and travels to the final ResilientHttpError.
+ * - `error` and `response` carry the outcome of the PREVIOUS attempt (undefined on attempt 1).
+ */
+export interface HookContext {
+  /**
+   * Mutable request spec for this attempt.
+   * `onRequest` hooks may mutate url, method, headers, or body.
+   * Reset from the original spec at the start of each attempt.
+   */
+  request: HookRequestSpec;
+
+  /** 1-based attempt number (1 = first try, 2 = first retry, …). */
+  attempt: number;
+
+  /** Unique ID for this specific attempt (changes each retry). */
+  attemptId: string;
+
+  /**
+   * Stable ID for the entire logical operation (all retries share this ID).
+   * Useful for correlating logs across attempts.
+   */
+  requestId: string;
+
+  /**
+   * Elapsed milliseconds since the first attempt started.
+   * Useful for observability in onRetry/onFailure hooks.
+   */
+  elapsed: number;
+
+  /**
+   * Error from the previous attempt (undefined on the first attempt).
+   * Present in onRequest (re-run after a failure), onRetry, and onFailure.
+   */
+  error?: unknown;
+
+  /**
+   * Response from the previous attempt (undefined on the first attempt or
+   * when the previous attempt threw without producing a response).
+   */
+  response?: unknown;
+
+  /**
+   * Arbitrary metadata that persists across all attempts.
+   * Hooks may read and write freely. This bag is attached to the final
+   * ResilientHttpError so callers can propagate retry-lifecycle state.
+   *
+   * Never logged automatically — callers control if/how meta is used.
+   */
+  meta: Record<string, unknown>;
+}
+
+/**
+ * Mutating hook invoked once per attempt (including retries), BEFORE the request is sent.
+ * May mutate `ctx.request` (url, method, headers, body).
+ * If it throws, the operation aborts with `ResilientHttpError { kind:'setup' }`.
+ */
+export type RequestHook = (ctx: HookContext) => void | Promise<void>;
+
+/**
+ * Mutating hook invoked after a response is received, BEFORE validateStatus.
+ * May inspect or lightly mutate context.
+ * If it throws, the operation aborts with `ResilientHttpError { kind:'setup' }`.
+ */
+export type ResponseHook = (ctx: HookContext) => void | Promise<void>;
+
+/**
+ * Read-only observer invoked before sleeping between attempts.
+ * Receives `(error, attempt, nextDelay)` signature for backward compat.
+ * If it throws, the error is silently captured — never propagated.
+ */
+export type RetryObserver = (
+  error: unknown,
+  attempt: number,
+  nextDelay: number
+) => void | Promise<void>;
+
+/**
+ * Read-only observer invoked when all attempts are exhausted or the engine gives up.
+ * Receives `(error, attempts)` signature.
+ * If it throws, the error is silently captured — never propagated.
+ */
+export type FailureObserver = (
+  error: unknown,
+  attempts: number
+) => void | Promise<void>;
+
+/**
+ * Hook configuration object.
+ * Each field accepts a single hook or an ordered array of hooks.
+ */
+export interface HookSet {
+  /** Run before each attempt (mutator). */
+  onRequest?: RequestHook | RequestHook[];
+  /** Run after each response, before validateStatus (mutator). */
+  onResponse?: ResponseHook | ResponseHook[];
+  /** Run before sleeping between attempts (observer). */
+  onRetry?: RetryObserver | RetryObserver[];
+  /** Run when the operation is finally abandoned (observer). */
+  onFailure?: FailureObserver | FailureObserver[];
+}
+
+/**
+ * Idempotency-key configuration.
+ *
+ * - `true`       → generate a random UUID once per logical operation.
+ * - `string`     → use this static value for all attempts.
+ * - `() => string` → called ONCE; the returned value is frozen for all retries.
+ *
+ * The key is attached as the `Idempotency-Key` header (or custom `idempotencyHeader`)
+ * BEFORE `onRequest` runs, so hooks can read it. If an `onRequest` hook overwrites
+ * the header, the hook's value wins for that attempt.
+ *
+ * PAYMENT SAFETY: the provider function is evaluated exactly once, no matter how
+ * many retries occur. This prevents a `() => randomUUID()` pattern from issuing
+ * a different key per attempt, which would result in double-charges.
+ */
+export type IdempotencyKeyOption =
+  | true
+  | string
+  | (() => string);
+
+/**
+ * Configuration for the request builder (Phase 5).
+ */
+export interface RequestBuilderOptions {
+  /** Target URL. */
+  url: string;
+  /** HTTP method (will be upper-cased). */
+  method: string;
+  /** Initial headers to include in every request. */
+  headers?: Record<string, string>;
+  /**
+   * Request body.
+   * - Strings and Uint8Array are replayed directly across retries.
+   * - JSON-serialisable objects are serialised once and replayed as a string.
+   * - ReadableStream or Request objects require no retry (retry:false) or throw a
+   *   setup error.
+   * - null/undefined = no body.
+   */
+  body?: unknown;
+  /** Idempotency-key configuration (see IdempotencyKeyOption). */
+  idempotencyKey?: IdempotencyKeyOption;
+  /**
+   * Header name for the idempotency key (default: 'Idempotency-Key').
+   */
+  idempotencyHeader?: string;
+  /** Hook set to execute per attempt. */
+  hooks?: HookSet;
+  /** Whether retry is active (affects body buffering validation). */
+  retryActive?: boolean;
+  /** Logger for hook observer errors. */
+  logger?: Logger;
 }
 
 /**
