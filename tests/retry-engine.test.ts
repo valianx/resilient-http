@@ -66,6 +66,7 @@ function makeError(opts: {
 describe('AC-1: per-attempt timeout fires when fn never resolves', () => {
   it('rejects with TimeoutError when fn listens on signal abort', async (t) => {
     enableFakeTimers(t);
+    let caughtError: unknown;
 
     const p = executeWithRetry(
       ({ signal }) =>
@@ -75,20 +76,19 @@ describe('AC-1: per-attempt timeout fires when fn never resolves', () => {
           }, { once: true });
         }),
       { maxAttempts: 1, timeout: 80 }
-    );
+    ).catch((err) => { caughtError = err; });
 
     await flush();
     await tick(80); // fires the AbortController timeout
     await flush();
+    await p; // p resolves because .catch() consumed the rejection
 
-    await assert.rejects(p, (err: unknown) => {
-      // Use name check instead of instanceof for cross-runtime compat (Bun).
-      assert.ok(
-        err instanceof Error && err.name === 'TimeoutError',
-        `expected TimeoutError, got ${err instanceof Error ? err.name : String(err)}`
-      );
-      return true;
-    });
+    // Use name check for cross-runtime compat — Bun's DOMException may not
+    // pass instanceof DOMException in assert.rejects validators.
+    assert.ok(
+      caughtError instanceof Error && caughtError.name === 'TimeoutError',
+      `expected TimeoutError, got ${caughtError instanceof Error ? caughtError.name : String(caughtError)}`
+    );
 
     resetTimers();
   });
@@ -96,6 +96,7 @@ describe('AC-1: per-attempt timeout fires when fn never resolves', () => {
   it('signal is propagated to fn and is aborted when timeout fires', async (t) => {
     enableFakeTimers(t);
     let capturedSignal: AbortSignal | undefined;
+    let caughtError: unknown;
 
     const p = executeWithRetry(
       ({ signal }) => {
@@ -107,14 +108,14 @@ describe('AC-1: per-attempt timeout fires when fn never resolves', () => {
         });
       },
       { maxAttempts: 1, timeout: 60 }
-    );
+    ).catch((err) => { caughtError = err; });
 
     await flush();
     await tick(60);
     await flush();
+    await p;
 
-    await assert.rejects(p);
-
+    assert.ok(caughtError instanceof Error, 'should have rejected');
     assert.ok(capturedSignal, 'fn should have received a signal');
     assert.equal(capturedSignal!.aborted, true, 'signal should be aborted after timeout');
 
