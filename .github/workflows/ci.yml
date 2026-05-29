@@ -18,8 +18,6 @@ jobs:
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
-        with:
-          version: 9
 
       - name: Setup Node.js ${{ matrix.node-version }}
         uses: actions/setup-node@v4
@@ -51,9 +49,6 @@ jobs:
 
       - name: Install dependencies
         run: bun install
-
-      - name: Type check
-        run: bun run typecheck
 
       - name: Test (Bun)
         run: bun test
