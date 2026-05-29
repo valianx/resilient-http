@@ -20,15 +20,18 @@ export function sleepWithAbort(
       return;
     }
 
-    const timeoutId = setTimeout(resolve, ms);
+    const timeoutId = setTimeout(() => {
+      // fix(sleep): remove abort listener on normal completion to prevent
+      // listener leak on long-lived reused signals (e.g. retry loops).
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
 
-    signal?.addEventListener(
-      'abort',
-      () => {
-        clearTimeout(timeoutId);
-        reject(new DOMException('Sleep aborted', 'AbortError'));
-      },
-      { once: true }
-    );
+    function onAbort() {
+      clearTimeout(timeoutId);
+      reject(new DOMException('Sleep aborted', 'AbortError'));
+    }
+
+    signal?.addEventListener('abort', onAbort, { once: true });
   });
 }

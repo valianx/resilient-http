@@ -36,9 +36,6 @@ export type JitterStrategy = 'full' | 'equal' | 'decorrelated' | 'none';
 // Retry Types
 // ============================================================================
 
-/** Predicate to determine if an error should trigger a retry */
-export type RetryPredicate = (error: unknown, attempt: number) => boolean;
-
 /** Callback invoked before each retry attempt */
 export type RetryCallback = (
   error: unknown,
@@ -50,11 +47,34 @@ export type RetryCallback = (
 export type FailureCallback = (error: unknown, attempts: number) => void;
 
 /**
- * Configuration options for retry behavior
+ * Minimal hook context passed to `shouldRetry` in Fase 2.
+ * Will be extended in Fase 5 with full request/response metadata.
+ */
+export interface RetryHookContext {
+  /** The error thrown by the most recent attempt. */
+  error: unknown;
+  /** 1-based attempt number that just failed. */
+  attempt: number;
+  /** HTTP status code of the failed response, if available. */
+  statusCode?: number;
+  /** HTTP method of the request, upper-cased (e.g. 'GET'). */
+  method?: string;
+  /** Whether the built-in gate would allow a retry for this error/method/status. */
+  gateAllows: boolean;
+}
+
+/**
+ * Configuration options for retry behavior (v2)
  */
 export interface RetryOptions {
-  /** Maximum number of retry attempts (default: 3) */
+  /**
+   * Total number of attempts (first attempt + retries).
+   * Default: 1 (no retries — callers must opt in).
+   */
   maxAttempts?: number;
+
+  /** Backoff strategy (default: 'exponential') */
+  backoff?: BackoffStrategy;
 
   /** Initial delay in milliseconds (default: 1000) */
   initialDelay?: number;
@@ -62,28 +82,64 @@ export interface RetryOptions {
   /** Maximum delay cap in milliseconds (default: 30000) */
   maxDelay?: number;
 
-  /** Backoff strategy (default: 'exponential') */
-  backoffStrategy?: BackoffStrategy;
-
   /** Backoff multiplier for exponential/linear (default: 2) */
-  backoffMultiplier?: number;
+  multiplier?: number;
 
   /** Jitter strategy (default: 'full') */
   jitter?: JitterStrategy;
 
-  /** Custom predicate to determine if error is retryable */
-  shouldRetry?: RetryPredicate;
+  /**
+   * HTTP status codes that are eligible for retry.
+   * Default: [408, 429, 500, 502, 503, 504]
+   */
+  retryableStatuses?: number[];
 
-  /** Timeout for each attempt in milliseconds (optional) */
+  /**
+   * HTTP methods that are eligible for retry.
+   * Default: ['GET', 'HEAD', 'PUT', 'DELETE', 'OPTIONS']
+   * POST is excluded by default to prevent double-charge on non-idempotent ops.
+   */
+  retryableMethods?: string[];
+
+  /**
+   * When true (default), honours `Retry-After` response headers.
+   * The delay is only respected when it does not exceed `maxRetryAfter`.
+   */
+  respectRetryAfter?: boolean;
+
+  /**
+   * Maximum `Retry-After` value (in ms) the engine will honour.
+   * If the header specifies a longer wait the engine gives up instead.
+   * Default: 60000 (60 s).
+   */
+  maxRetryAfter?: number;
+
+  /**
+   * Custom gate. Receives context about the failed attempt and returns
+   * `true` to allow a retry, `false` to stop.
+   * If this callback throws, the engine fails-closed: it does NOT retry and
+   * propagates the ORIGINAL operation error (not the callback error).
+   * Note: `shouldRetry` cannot override `maxAttempts` or `deadline` hard caps.
+   */
+  shouldRetry?: (ctx: RetryHookContext) => boolean | Promise<boolean>;
+
+  /** Per-attempt timeout in milliseconds (optional). */
   timeout?: number;
 
-  /** Callback before each retry */
+  /**
+   * Absolute deadline as milliseconds from epoch (Date.now()-compatible).
+   * The engine will not start a new attempt if `Date.now() >= deadline`.
+   * Also, `effectiveTimeout = min(timeout, deadlineRemaining)` per attempt.
+   */
+  deadline?: number;
+
+  /** Callback invoked before each retry (after the first failure). */
   onRetry?: RetryCallback;
 
-  /** Callback on final failure */
+  /** Callback invoked when all attempts are exhausted or engine gives up. */
   onFailure?: FailureCallback;
 
-  /** Optional logger for debugging */
+  /** Optional logger for debugging. */
   logger?: Logger;
 }
 
