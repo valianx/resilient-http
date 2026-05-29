@@ -26,8 +26,24 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Lint
+        run: pnpm lint
+
+      - name: Type check
+        run: pnpm typecheck
+
       - name: Build
         run: pnpm build
+
+      - name: Test (Node.js)
+        run: pnpm test:node
+
+      - name: Validate package (publint)
+        run: pnpm dlx publint
+
+      - name: Validate types (are-the-types-wrong)
+        run: pnpm dlx @arethetypeswrong/cli --pack .
+        continue-on-error: true
 
       - name: Publish to npm
         run: pnpm publish --provenance --access public --no-git-checks
