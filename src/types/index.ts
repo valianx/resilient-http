@@ -357,6 +357,220 @@ export type ErrorClassification =
  */
 export type ErrorKind = 'response' | 'network' | 'setup';
 
+// ============================================================================
+// Client Types (Phase 6)
+// ============================================================================
+
+/**
+ * Supported response parsing modes.
+ * - 'auto'        : detect from Content-Type (default)
+ * - 'json'        : force JSON parse
+ * - 'text'        : force text parse
+ * - 'arrayBuffer' : force ArrayBuffer parse
+ * - 'blob'        : force Blob parse
+ * - 'stream'      : return the ReadableStream without buffering
+ * - 'none'        : do not touch the body (data === null)
+ */
+export type ResponseType = 'auto' | 'json' | 'text' | 'arrayBuffer' | 'blob' | 'stream' | 'none';
+
+/**
+ * Instance-level options passed to `createResilientHttp`.
+ * These become the defaults for every request made through this client instance.
+ */
+export interface ResilientHttpOptions {
+  /** Base URL prepended to every request URL (e.g. 'https://api.example.com'). */
+  baseURL?: string;
+
+  /**
+   * Default headers merged into every request.
+   * Per-request headers override these on a key-by-key basis.
+   */
+  headers?: Record<string, string>;
+
+  /**
+   * Per-attempt timeout in milliseconds (applies to every attempt).
+   * Forwarded to the retry engine and to the fetch signal.
+   */
+  timeout?: number;
+
+  /**
+   * Absolute deadline as a Unix-millisecond timestamp (Date.now()-compatible).
+   * Forwarded to the retry engine — no new attempt starts after this time.
+   */
+  deadline?: number;
+
+  /**
+   * Retry configuration. `maxAttempts` defaults to 1 (no retries).
+   * Pass `{ maxAttempts: 3 }` to enable retries.
+   */
+  retry?: RetryOptions;
+
+  /**
+   * Hook set executed per request/response/retry/failure lifecycle event.
+   */
+  hooks?: HookSet;
+
+  /**
+   * Default response type for body parsing.
+   * Default: 'auto'.
+   */
+  responseType?: ResponseType;
+
+  /**
+   * Custom fetch implementation (default: globalThis.fetch).
+   * Useful for testing and environments with a non-standard fetch.
+   */
+  fetch?: typeof globalThis.fetch;
+
+  /**
+   * Custom validateStatus predicate.
+   * Return true to treat the response as a success; false to throw.
+   * Default: (status) => status >= 200 && status < 300.
+   */
+  validateStatus?: (status: number) => boolean;
+
+  /**
+   * Logger for internal diagnostics (warnings, observer errors).
+   * Compatible with console, winston, pino, etc.
+   */
+  logger?: Logger;
+
+  /**
+   * Header names (lower-cased) to redact in error toJSON() output.
+   * Merged with the built-in denylist.
+   */
+  redactHeaders?: string[];
+
+  /**
+   * Query parameter names to redact in error toJSON() url field.
+   */
+  redactQueryParams?: string[];
+
+  /**
+   * Default idempotency-key configuration (see IdempotencyKeyOption).
+   * Applied to all requests unless overridden per-request.
+   */
+  idempotencyKey?: IdempotencyKeyOption;
+
+  /**
+   * Header name for the idempotency key (default: 'Idempotency-Key').
+   */
+  idempotencyHeader?: string;
+}
+
+/**
+ * Per-request configuration. Overrides the instance-level ResilientHttpOptions
+ * on a category-by-category shallow merge (not deep-merged recursively).
+ */
+export interface RequestConfig {
+  /** Override the HTTP method (rarely needed — prefer the method shortcuts). */
+  method?: string;
+
+  /**
+   * Query string parameters appended to the URL.
+   * Values are stringified with String() and appended via URLSearchParams.
+   */
+  params?: Record<string, string | number | boolean | null | undefined>;
+
+  /**
+   * Request headers merged (shallowly) with the instance headers.
+   * Per-request headers win on key conflicts.
+   */
+  headers?: Record<string, string>;
+
+  /**
+   * Request body. Serialisable objects are JSON-encoded;
+   * strings and Uint8Arrays are passed through directly.
+   * Streams require retry to be OFF (maxAttempts === 1).
+   */
+  body?: unknown;
+
+  /**
+   * Shorthand for a JSON body — object is JSON-encoded and Content-Type
+   * is set to 'application/json'. Mutually exclusive with `body`.
+   * If both are present, `json` takes precedence.
+   */
+  json?: unknown;
+
+  /**
+   * Override the response type for this request.
+   */
+  responseType?: ResponseType;
+
+  /**
+   * Override the validateStatus predicate for this request.
+   */
+  validateStatus?: (status: number) => boolean;
+
+  /**
+   * Override the timeout for this request (milliseconds).
+   */
+  timeout?: number;
+
+  /**
+   * Override the deadline for this request.
+   */
+  deadline?: number;
+
+  /**
+   * Override retry options for this request.
+   */
+  retry?: RetryOptions;
+
+  /**
+   * Override or extend hooks for this request.
+   */
+  hooks?: HookSet;
+
+  /**
+   * Caller-supplied AbortSignal.
+   * Composed with the per-attempt timeout/deadline signal.
+   */
+  signal?: AbortSignal;
+
+  /**
+   * Override the idempotency key for this request.
+   */
+  idempotencyKey?: IdempotencyKeyOption;
+}
+
+/**
+ * Successful response returned from the resilient HTTP client.
+ */
+export interface ResilientResponse<T = unknown> {
+  /** Parsed response body (null for 204/205/304 or when responseType is 'none'). */
+  data: T | null;
+
+  /** HTTP status code. */
+  status: number;
+
+  /** Response headers as a plain key-value object. */
+  headers: Record<string, string>;
+
+  /** Final URL after redirects. */
+  url: string;
+
+  /** Total number of attempts made (1 = success on first try). */
+  attempts: number;
+
+  /** The raw Fetch API Response object for advanced use. */
+  raw: Response;
+}
+
+/**
+ * The resilient HTTP client instance returned by `createResilientHttp`.
+ */
+export interface ResilientHttpClient {
+  get<T = unknown>(url: string, config?: RequestConfig): Promise<ResilientResponse<T>>;
+  post<T = unknown>(url: string, config?: RequestConfig): Promise<ResilientResponse<T>>;
+  put<T = unknown>(url: string, config?: RequestConfig): Promise<ResilientResponse<T>>;
+  patch<T = unknown>(url: string, config?: RequestConfig): Promise<ResilientResponse<T>>;
+  delete<T = unknown>(url: string, config?: RequestConfig): Promise<ResilientResponse<T>>;
+  head<T = unknown>(url: string, config?: RequestConfig): Promise<ResilientResponse<T>>;
+  options<T = unknown>(url: string, config?: RequestConfig): Promise<ResilientResponse<T>>;
+  request<T = unknown>(config: RequestConfig & { url: string; method: string }): Promise<ResilientResponse<T>>;
+}
+
 /**
  * Standardized error representation (v2).
  *

@@ -429,6 +429,12 @@ export class RequestBuilder {
    * Resolve the final body for this attempt.
    * If ctx.request.body was mutated by a hook, use that value.
    * Otherwise use the stable replay buffer.
+   *
+   * fix(SEC-003): if a hook set ctx.request.body to a non-serialisable value
+   * (e.g. an object with circular references), JSON.stringify MUST throw a
+   * ResilientHttpError{kind:'setup'} rather than silently returning null.
+   * A silent null would send an empty body — in payment contexts, that is a
+   * malformed charge request that downstream processors may still authorise.
    */
   #resolveBody(ctx: HookContext): BufferedBody | undefined {
     // If a hook set ctx.request.body to a defined value, use it as a string.
@@ -437,10 +443,23 @@ export class RequestBuilder {
       if (ctx.request.body instanceof Uint8Array) return ctx.request.body;
       if (ctx.request.body === null) return null;
       // Hook set an object — serialise it.
+      // fix(SEC-003): throw setup error on non-serialisable body; never return null silently.
       try {
         return JSON.stringify(ctx.request.body);
-      } catch {
-        return null;
+      } catch (cause) {
+        throw new ResilientHttpError({
+          kind: 'setup',
+          message: `onRequest hook set ctx.request.body to a non-serialisable value: ${
+            cause instanceof Error ? cause.message : String(cause)
+          }`,
+          cause,
+          url: ctx.request.url,
+          method: ctx.request.method,
+          attempts: ctx.attempt,
+          requestId: ctx.requestId,
+          attemptId: ctx.attemptId,
+          meta: ctx.meta,
+        });
       }
     }
 
