@@ -82,8 +82,11 @@ describe('AC-1: per-attempt timeout fires when fn never resolves', () => {
     await flush();
 
     await assert.rejects(p, (err: unknown) => {
-      assert.ok(err instanceof DOMException, `expected DOMException, got ${err}`);
-      assert.equal(err.name, 'TimeoutError');
+      // Use name check instead of instanceof for cross-runtime compat (Bun).
+      assert.ok(
+        err instanceof Error && err.name === 'TimeoutError',
+        `expected TimeoutError, got ${err instanceof Error ? err.name : String(err)}`
+      );
       return true;
     });
 
