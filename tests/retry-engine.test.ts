@@ -7,7 +7,7 @@
  *   AC-3:  GET 503 → retries; POST 503 → does NOT; network POST → does NOT
  *   AC-3b: POST timeout (no status) → does NOT retry; GET timeout → does retry;
  *          POST with retryableMethods:['POST'] → does
- *   AC-4:  timeout:50 + deadline:120, fn always exceeds → limited attempts
+ *   AC-4:  timeout + deadline → limited attempts
  *   AC-5:  callerSignal aborted mid-flight → rejects AbortError, no retry
  *   AC-5b: 3-signal cross scenarios
  *   AC-6:  shouldRetry=true doesn't exceed maxAttempts/deadline; =false cuts early
@@ -15,19 +15,20 @@
  *   AC-7:  happy path, exhaustion, non-retryable; onRetry/onFailure called correctly
  *   AC-8:  engine.ts does NOT import from errors/extractor.ts (grep check inline)
  *
- * Determinism strategy:
- *   - buildAttemptSignal now uses AbortController + setTimeout (not AbortSignal.timeout)
- *     so mock.timers.enable(['setTimeout']) intercepts ALL timers — both the engine's
- *     per-attempt timeout AND the inter-attempt sleep().
- *   - Tests that need the fn to "time out" use t.mock.timers.tick() to advance
- *     the fake clock instead of waiting real milliseconds.
- *   - Tests for caller-abort semantics use AbortController.abort() synchronously.
- *   - initialDelay:0 + jitter:none makes inter-attempt sleep(0) a no-op tick.
+ * Cross-runtime timer strategy:
+ *   - buildAttemptSignal uses AbortController + setTimeout (not AbortSignal.timeout),
+ *     so all timers are standard setTimeout calls.
+ *   - Node 22: mock.timers intercepts setTimeout → tick() advances fake clock
+ *     deterministically (total test time ~5ms).
+ *   - Bun: mock.timers not available → tick() awaits real time. Bun's single-
+ *     threaded test runner ensures sequential execution without cancellations.
+ *   - initialDelay:0 + jitter:none makes inter-attempt sleep(0) instant.
  */
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { executeWithRetry, executeWithRetryAndSignal } from '../src/retry/engine';
+import { enableFakeTimers, tick, flush, resetTimers } from './test-utils.ts';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -59,30 +60,12 @@ function makeError(opts: {
 }
 
 // ---------------------------------------------------------------------------
-// Helpers for mock.timers tests
-//
-// When mock.timers intercepts setTimeout, awaiting promises requires flushing
-// the microtask queue between clock ticks. The engine has layered awaits:
-//   fn() → sleep() → evaluateShouldRetry() → next iteration
-// We flush with multiple Promise.resolve() rounds between ticks.
-// ---------------------------------------------------------------------------
-
-async function flushMicrotasks(rounds = 5): Promise<void> {
-  for (let i = 0; i < rounds; i++) {
-    await Promise.resolve();
-  }
-}
-
-// ---------------------------------------------------------------------------
 // AC-1: fn that never resolves + timeout fires → rejects with TimeoutError
-//
-// With mock.timers, the setTimeout in buildAttemptSignal is a fake timer.
-// tick(timeout) fires the abort, which causes the fn to reject.
 // ---------------------------------------------------------------------------
 
 describe('AC-1: per-attempt timeout fires when fn never resolves', () => {
   it('rejects with TimeoutError when fn listens on signal abort', async (t) => {
-    t.mock.timers.enable({ apis: ['setTimeout'] });
+    enableFakeTimers(t);
 
     const p = executeWithRetry(
       ({ signal }) =>
@@ -94,9 +77,9 @@ describe('AC-1: per-attempt timeout fires when fn never resolves', () => {
       { maxAttempts: 1, timeout: 80 }
     );
 
-    await flushMicrotasks();
-    t.mock.timers.tick(80); // fires the AbortController timeout in buildAttemptSignal
-    await flushMicrotasks();
+    await flush();
+    await tick(80); // fires the AbortController timeout
+    await flush();
 
     await assert.rejects(p, (err: unknown) => {
       assert.ok(err instanceof DOMException, `expected DOMException, got ${err}`);
@@ -104,11 +87,11 @@ describe('AC-1: per-attempt timeout fires when fn never resolves', () => {
       return true;
     });
 
-    t.mock.timers.reset();
+    resetTimers();
   });
 
   it('signal is propagated to fn and is aborted when timeout fires', async (t) => {
-    t.mock.timers.enable({ apis: ['setTimeout'] });
+    enableFakeTimers(t);
     let capturedSignal: AbortSignal | undefined;
 
     const p = executeWithRetry(
@@ -123,16 +106,16 @@ describe('AC-1: per-attempt timeout fires when fn never resolves', () => {
       { maxAttempts: 1, timeout: 60 }
     );
 
-    await flushMicrotasks();
-    t.mock.timers.tick(60);
-    await flushMicrotasks();
+    await flush();
+    await tick(60);
+    await flush();
 
     await assert.rejects(p);
 
     assert.ok(capturedSignal, 'fn should have received a signal');
     assert.equal(capturedSignal!.aborted, true, 'signal should be aborted after timeout');
 
-    t.mock.timers.reset();
+    resetTimers();
   });
 });
 
@@ -142,23 +125,22 @@ describe('AC-1: per-attempt timeout fires when fn never resolves', () => {
 
 describe('AC-2: fn resolves before timeout', () => {
   it('resolves successfully when fn returns before timeout', async (t) => {
-    t.mock.timers.enable({ apis: ['setTimeout'] });
+    enableFakeTimers(t);
 
     const p = executeWithRetry(
       async () => 'ok',
       { maxAttempts: 1, timeout: 5000 }
     );
 
-    await flushMicrotasks();
-    // fn resolves immediately — no tick needed for timeout.
+    await flush();
     const result = await p;
     assert.equal(result, 'ok');
 
-    t.mock.timers.reset();
+    resetTimers();
   });
 
   it('retries on a retryable error and eventually succeeds', async (t) => {
-    t.mock.timers.enable({ apis: ['setTimeout'] });
+    enableFakeTimers(t);
     let calls = 0;
 
     const p = executeWithRetry(
@@ -169,25 +151,24 @@ describe('AC-2: fn resolves before timeout', () => {
       },
       {
         maxAttempts: 3,
-        initialDelay: 0, // sleep(0) — instant
+        initialDelay: 0,
         jitter: 'none',
         retryableMethods: ['GET'],
       },
       'GET'
     );
 
-    // Advance through inter-attempt sleeps.
-    await flushMicrotasks();
-    t.mock.timers.tick(0); // sleep(0) after attempt 1
-    await flushMicrotasks();
-    t.mock.timers.tick(0); // sleep(0) after attempt 2
-    await flushMicrotasks();
+    await flush();
+    await tick(0);
+    await flush();
+    await tick(0);
+    await flush();
 
     const result = await p;
     assert.equal(result, 'done');
     assert.equal(calls, 3);
 
-    t.mock.timers.reset();
+    resetTimers();
   });
 });
 
@@ -197,7 +178,7 @@ describe('AC-2: fn resolves before timeout', () => {
 
 describe('AC-3: method gate', () => {
   it('GET 503 defaults → retries', async (t) => {
-    t.mock.timers.enable({ apis: ['setTimeout'] });
+    enableFakeTimers(t);
     let calls = 0;
 
     const p = executeWithRetry(
@@ -209,19 +190,19 @@ describe('AC-3: method gate', () => {
       'GET'
     ).catch(() => { /* expected */ });
 
-    await flushMicrotasks();
-    t.mock.timers.tick(0);
-    await flushMicrotasks();
-    t.mock.timers.tick(0);
-    await flushMicrotasks();
+    await flush();
+    await tick(0);
+    await flush();
+    await tick(0);
+    await flush();
     await p;
 
     assert.equal(calls, 3, 'GET 503 should retry up to maxAttempts');
-    t.mock.timers.reset();
+    resetTimers();
   });
 
   it('POST 503 defaults → does NOT retry', async (t) => {
-    t.mock.timers.enable({ apis: ['setTimeout'] });
+    enableFakeTimers(t);
     let calls = 0;
 
     const p = executeWithRetry(
@@ -233,15 +214,15 @@ describe('AC-3: method gate', () => {
       'POST'
     ).catch(() => { /* expected */ });
 
-    await flushMicrotasks();
+    await flush();
     await p;
 
-    assert.equal(calls, 1, 'POST 503 should not retry (default method gate)');
-    t.mock.timers.reset();
+    assert.equal(calls, 1, 'POST 503 should not retry');
+    resetTimers();
   });
 
   it('network error on POST → does NOT retry', async (t) => {
-    t.mock.timers.enable({ apis: ['setTimeout'] });
+    enableFakeTimers(t);
     let calls = 0;
     const networkErr = makeError({ code: 'ECONNRESET' });
     networkErr['config'] = { method: 'POST' };
@@ -255,11 +236,11 @@ describe('AC-3: method gate', () => {
       'POST'
     ).catch(() => { /* expected */ });
 
-    await flushMicrotasks();
+    await flush();
     await p;
 
     assert.equal(calls, 1, 'network error on POST should not retry');
-    t.mock.timers.reset();
+    resetTimers();
   });
 });
 
@@ -270,7 +251,7 @@ describe('AC-3: method gate', () => {
 
 describe('AC-3b: timeout (no status) method gate', () => {
   it('POST timeout (no status) → does NOT retry (double-charge protection)', async (t) => {
-    t.mock.timers.enable({ apis: ['setTimeout'] });
+    enableFakeTimers(t);
     let calls = 0;
 
     const p = executeWithRetry(
@@ -286,17 +267,17 @@ describe('AC-3b: timeout (no status) method gate', () => {
       'POST'
     ).catch(() => { /* expected */ });
 
-    await flushMicrotasks();
-    t.mock.timers.tick(30); // fire the timeout → POST should NOT retry
-    await flushMicrotasks();
+    await flush();
+    await tick(30);
+    await flush();
     await p;
 
     assert.equal(calls, 1, 'POST timeout should not retry');
-    t.mock.timers.reset();
+    resetTimers();
   });
 
   it('GET timeout → retries', async (t) => {
-    t.mock.timers.enable({ apis: ['setTimeout'] });
+    enableFakeTimers(t);
     let calls = 0;
 
     const p = executeWithRetry(
@@ -312,22 +293,21 @@ describe('AC-3b: timeout (no status) method gate', () => {
       'GET'
     ).catch(() => { /* expected */ });
 
-    // Each attempt: tick to fire timeout, flush, then tick 0 for inter-attempt sleep.
     for (let i = 0; i < 3; i++) {
-      await flushMicrotasks();
-      t.mock.timers.tick(30); // fire per-attempt timeout
-      await flushMicrotasks();
-      t.mock.timers.tick(0); // fire inter-attempt sleep(0)
-      await flushMicrotasks();
+      await flush();
+      await tick(30);
+      await flush();
+      await tick(0);
+      await flush();
     }
     await p;
 
     assert.ok(calls >= 2, `GET timeout should retry, got ${calls} calls`);
-    t.mock.timers.reset();
+    resetTimers();
   });
 
   it('retryableMethods:["POST"] → POST retries on 503', async (t) => {
-    t.mock.timers.enable({ apis: ['setTimeout'] });
+    enableFakeTimers(t);
     let calls = 0;
 
     const p = executeWithRetry(
@@ -339,15 +319,15 @@ describe('AC-3b: timeout (no status) method gate', () => {
       'POST'
     ).catch(() => { /* expected */ });
 
-    await flushMicrotasks();
-    t.mock.timers.tick(0);
-    await flushMicrotasks();
-    t.mock.timers.tick(0);
-    await flushMicrotasks();
+    await flush();
+    await tick(0);
+    await flush();
+    await tick(0);
+    await flush();
     await p;
 
     assert.equal(calls, 3, 'POST should retry when explicitly in retryableMethods');
-    t.mock.timers.reset();
+    resetTimers();
   });
 });
 
@@ -357,7 +337,7 @@ describe('AC-3b: timeout (no status) method gate', () => {
 
 describe('AC-4: deadline hard cap', () => {
   it('stops retrying when deadline would be exceeded before next attempt', async (t) => {
-    t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+    enableFakeTimers(t, { includeDate: true });
     let calls = 0;
     const deadline = Date.now() + 120;
 
@@ -380,28 +360,21 @@ describe('AC-4: deadline hard cap', () => {
       'GET'
     ).catch(() => { /* expected rejection */ });
 
-    // Attempt 1: tick 50ms (timeout fires), then 0ms (sleep), then advance
-    // Date by 50ms so deadline check fails for next attempts.
-    await flushMicrotasks();
-    t.mock.timers.tick(50);
-    await flushMicrotasks();
-    t.mock.timers.tick(0); // inter-attempt sleep
-    await flushMicrotasks();
-
-    // Attempt 2: tick another 50ms
-    t.mock.timers.tick(50);
-    await flushMicrotasks();
-    t.mock.timers.tick(0);
-    await flushMicrotasks();
-
-    // Advance more to push past deadline (120ms from start)
-    t.mock.timers.tick(50);
-    await flushMicrotasks();
-
+    await flush();
+    await tick(50);
+    await flush();
+    await tick(0);
+    await flush();
+    await tick(50);
+    await flush();
+    await tick(0);
+    await flush();
+    await tick(50);
+    await flush();
     await p;
 
     assert.ok(calls >= 1 && calls <= 4, `expected 1-4 attempts within deadline, got ${calls}`);
-    t.mock.timers.reset();
+    resetTimers();
   });
 });
 
@@ -411,7 +384,7 @@ describe('AC-4: deadline hard cap', () => {
 
 describe('AC-5: caller signal abort stops everything', () => {
   it('rejects immediately when callerSignal is aborted mid-flight', async (t) => {
-    t.mock.timers.enable({ apis: ['setTimeout'] });
+    enableFakeTimers(t);
     const controller = new AbortController();
     let calls = 0;
 
@@ -428,11 +401,9 @@ describe('AC-5: caller signal abort stops everything', () => {
       { maxAttempts: 5, initialDelay: 1000 }
     );
 
-    await flushMicrotasks();
-
-    // Abort the caller signal — this triggers the fn's abort listener immediately.
-    controller.abort();
-    await flushMicrotasks();
+    await flush();
+    controller.abort(); // synchronous abort
+    await flush();
 
     await assert.rejects(p, (err: unknown) => {
       assert.ok(err instanceof DOMException);
@@ -441,11 +412,11 @@ describe('AC-5: caller signal abort stops everything', () => {
     });
 
     assert.equal(calls, 1, 'should not retry after caller abort');
-    t.mock.timers.reset();
+    resetTimers();
   });
 
   it('rejects with AbortError before first attempt when signal already aborted', async (t) => {
-    t.mock.timers.enable({ apis: ['setTimeout'] });
+    enableFakeTimers(t);
     const controller = new AbortController();
     controller.abort();
     let calls = 0;
@@ -456,7 +427,7 @@ describe('AC-5: caller signal abort stops everything', () => {
       { maxAttempts: 3 }
     );
 
-    await flushMicrotasks();
+    await flush();
 
     await assert.rejects(p, (err: unknown) => {
       assert.ok(err instanceof DOMException && err.name === 'AbortError');
@@ -464,7 +435,7 @@ describe('AC-5: caller signal abort stops everything', () => {
     });
 
     assert.equal(calls, 0, 'should not call fn when signal already aborted');
-    t.mock.timers.reset();
+    resetTimers();
   });
 });
 
@@ -474,7 +445,7 @@ describe('AC-5: caller signal abort stops everything', () => {
 
 describe('AC-5b: engine-level 3-signal cross scenarios', () => {
   it('Case A: caller abort wins over internal timeout', async (t) => {
-    t.mock.timers.enable({ apis: ['setTimeout'] });
+    enableFakeTimers(t);
     const controller = new AbortController();
 
     const p = executeWithRetryAndSignal(
@@ -492,12 +463,10 @@ describe('AC-5b: engine-level 3-signal cross scenarios', () => {
       { maxAttempts: 1, timeout: 200 }
     );
 
-    await flushMicrotasks();
-
-    // Abort caller at tick 20ms (before 200ms internal timeout).
-    t.mock.timers.tick(20);
-    controller.abort(); // abort happens at fake 20ms
-    await flushMicrotasks();
+    await flush();
+    await tick(20); // advance 20ms (less than 200ms internal timeout)
+    controller.abort(); // caller aborts before internal timeout
+    await flush();
 
     await assert.rejects(p, (err: unknown) => {
       assert.ok(err instanceof DOMException && err.name === 'AbortError',
@@ -505,28 +474,22 @@ describe('AC-5b: engine-level 3-signal cross scenarios', () => {
       return true;
     });
 
-    t.mock.timers.reset();
+    resetTimers();
   });
 
-  it('Case B: effective timeout = min(timeout, remainingDeadline)', async (t) => {
-    // Pure arithmetic test: verify effectiveTimeout is set correctly.
-    // No real timers needed — just verify the calculation.
-    t.mock.timers.enable({ apis: ['setTimeout'] });
-
-    const { buildAttemptSignal } = await import('../src/core/signals');
+  it('Case B: effectiveTimeout = min(timeout, remainingDeadline)', async () => {
+    // Pure arithmetic — no timers needed.
     const deadlineAt = Date.now() + 80;
+    const { buildAttemptSignal } = await import('../src/core/signals');
     const { effectiveTimeout, cleanup } = buildAttemptSignal({
       timeout: 200,
       deadlineAt,
     });
-
     assert.ok(
       effectiveTimeout !== undefined && effectiveTimeout <= 80,
-      `effectiveTimeout should be ≤80 (min of 200 and ~80), got ${effectiveTimeout}`
+      `effectiveTimeout should be ≤80, got ${effectiveTimeout}`
     );
     cleanup();
-
-    t.mock.timers.reset();
   });
 });
 
@@ -536,7 +499,7 @@ describe('AC-5b: engine-level 3-signal cross scenarios', () => {
 
 describe('AC-6: shouldRetry gate', () => {
   it('shouldRetry returning true still respects maxAttempts hard cap', async (t) => {
-    t.mock.timers.enable({ apis: ['setTimeout'] });
+    enableFakeTimers(t);
     let calls = 0;
 
     const p = executeWithRetry(
@@ -553,17 +516,17 @@ describe('AC-6: shouldRetry gate', () => {
       'GET'
     ).catch(() => { /* expected */ });
 
-    await flushMicrotasks();
-    t.mock.timers.tick(0);
-    await flushMicrotasks();
+    await flush();
+    await tick(0);
+    await flush();
     await p;
 
     assert.equal(calls, 2, 'maxAttempts is a hard cap regardless of shouldRetry');
-    t.mock.timers.reset();
+    resetTimers();
   });
 
   it('shouldRetry returning false stops retrying even when gate would allow', async (t) => {
-    t.mock.timers.enable({ apis: ['setTimeout'] });
+    enableFakeTimers(t);
     let calls = 0;
 
     const p = executeWithRetry(
@@ -580,15 +543,15 @@ describe('AC-6: shouldRetry gate', () => {
       'GET'
     ).catch(() => { /* expected */ });
 
-    await flushMicrotasks();
+    await flush();
     await p;
 
     assert.equal(calls, 1, 'shouldRetry=false should cut retries immediately');
-    t.mock.timers.reset();
+    resetTimers();
   });
 
   it('shouldRetry returning true still respects deadline', async (t) => {
-    t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+    enableFakeTimers(t, { includeDate: true });
     let calls = 0;
     const deadline = Date.now() + 60;
 
@@ -612,19 +575,19 @@ describe('AC-6: shouldRetry gate', () => {
       'GET'
     ).catch(() => { /* expected */ });
 
-    await flushMicrotasks();
-    t.mock.timers.tick(30); // attempt 1 timeout
-    await flushMicrotasks();
-    t.mock.timers.tick(0);  // sleep
-    await flushMicrotasks();
-    t.mock.timers.tick(30); // attempt 2 timeout
-    await flushMicrotasks();
-    t.mock.timers.tick(30); // push past deadline
-    await flushMicrotasks();
+    await flush();
+    await tick(30);
+    await flush();
+    await tick(0);
+    await flush();
+    await tick(30);
+    await flush();
+    await tick(30);
+    await flush();
     await p;
 
     assert.ok(calls <= 4, `deadline should cap at ~2 attempts, got ${calls}`);
-    t.mock.timers.reset();
+    resetTimers();
   });
 });
 
@@ -634,10 +597,10 @@ describe('AC-6: shouldRetry gate', () => {
 
 describe('AC-6b: shouldRetry fail-closed on throw', () => {
   it('propagates the ORIGINAL operation error when shouldRetry throws', async (t) => {
-    t.mock.timers.enable({ apis: ['setTimeout'] });
+    enableFakeTimers(t);
     const originalError = makeError({ statusCode: 503 });
-
     let calls = 0;
+
     const p = executeWithRetry(
       async () => {
         calls++;
@@ -652,7 +615,7 @@ describe('AC-6b: shouldRetry fail-closed on throw', () => {
       'GET'
     );
 
-    await flushMicrotasks();
+    await flush();
 
     await assert.rejects(p, (err: unknown) => {
       assert.equal(err, originalError, 'should propagate original op error');
@@ -660,11 +623,11 @@ describe('AC-6b: shouldRetry fail-closed on throw', () => {
     });
 
     assert.equal(calls, 1, 'should not retry when shouldRetry throws');
-    t.mock.timers.reset();
+    resetTimers();
   });
 
   it('does not loop when shouldRetry throws on every call', async (t) => {
-    t.mock.timers.enable({ apis: ['setTimeout'] });
+    enableFakeTimers(t);
     let calls = 0;
 
     const p = executeWithRetry(
@@ -681,11 +644,11 @@ describe('AC-6b: shouldRetry fail-closed on throw', () => {
       'GET'
     ).catch(() => { /* expected */ });
 
-    await flushMicrotasks();
+    await flush();
     await p;
 
     assert.equal(calls, 1, 'should stop after first shouldRetry throw (fail-closed)');
-    t.mock.timers.reset();
+    resetTimers();
   });
 });
 
@@ -695,7 +658,7 @@ describe('AC-6b: shouldRetry fail-closed on throw', () => {
 
 describe('AC-7: observers and lifecycle', () => {
   it('happy path: resolves without calling onRetry or onFailure', async (t) => {
-    t.mock.timers.enable({ apis: ['setTimeout'] });
+    enableFakeTimers(t);
     const retryCalls: number[] = [];
     const failureCalls: number[] = [];
 
@@ -708,17 +671,17 @@ describe('AC-7: observers and lifecycle', () => {
       }
     );
 
-    await flushMicrotasks();
+    await flush();
     const result = await p;
 
     assert.equal(result, 42);
     assert.equal(retryCalls.length, 0);
     assert.equal(failureCalls.length, 0);
-    t.mock.timers.reset();
+    resetTimers();
   });
 
   it('exhaustion: onRetry called N-1 times, onFailure called once', async (t) => {
-    t.mock.timers.enable({ apis: ['setTimeout'] });
+    enableFakeTimers(t);
     const retryCalls: Array<[unknown, number, number]> = [];
     const failureCalls: Array<[unknown, number]> = [];
     let calls = 0;
@@ -738,11 +701,11 @@ describe('AC-7: observers and lifecycle', () => {
       'GET'
     ).catch(() => { /* expected */ });
 
-    await flushMicrotasks();
-    t.mock.timers.tick(0);
-    await flushMicrotasks();
-    t.mock.timers.tick(0);
-    await flushMicrotasks();
+    await flush();
+    await tick(0);
+    await flush();
+    await tick(0);
+    await flush();
     await p;
 
     assert.equal(calls, 3);
@@ -751,11 +714,11 @@ describe('AC-7: observers and lifecycle', () => {
     assert.equal(retryCalls[0][1], 1);
     assert.equal(retryCalls[1][1], 2);
     assert.equal(failureCalls[0][1], 3);
-    t.mock.timers.reset();
+    resetTimers();
   });
 
   it('non-retryable error: onFailure called immediately after first attempt', async (t) => {
-    t.mock.timers.enable({ apis: ['setTimeout'] });
+    enableFakeTimers(t);
     const failureCalls: Array<[unknown, number]> = [];
     const retryCalls: number[] = [];
 
@@ -769,13 +732,13 @@ describe('AC-7: observers and lifecycle', () => {
       'GET'
     ).catch(() => { /* expected */ });
 
-    await flushMicrotasks();
+    await flush();
     await p;
 
     assert.equal(retryCalls.length, 0, 'onRetry should not be called for non-retryable');
     assert.equal(failureCalls.length, 1);
     assert.equal(failureCalls[0][1], 1, 'onFailure should report 1 attempt');
-    t.mock.timers.reset();
+    resetTimers();
   });
 });
 
@@ -807,7 +770,7 @@ describe('AC-8: no import from errors/extractor in engine.ts', () => {
 
 describe('Retry-After header handling', () => {
   it('respects Retry-After (delta-seconds 0) when within maxRetryAfter', async (t) => {
-    t.mock.timers.enable({ apis: ['setTimeout'] });
+    enableFakeTimers(t);
     let calls = 0;
 
     const p = executeWithRetry(
@@ -824,17 +787,17 @@ describe('Retry-After header handling', () => {
       'GET'
     ).catch(() => { /* expected */ });
 
-    await flushMicrotasks();
-    t.mock.timers.tick(0); // 0ms Retry-After
-    await flushMicrotasks();
+    await flush();
+    await tick(0);
+    await flush();
     await p;
 
     assert.equal(calls, 2);
-    t.mock.timers.reset();
+    resetTimers();
   });
 
   it('gives up when Retry-After (delta-seconds) exceeds maxRetryAfter', async (t) => {
-    t.mock.timers.enable({ apis: ['setTimeout'] });
+    enableFakeTimers(t);
     let calls = 0;
 
     const p = executeWithRetry(
@@ -851,15 +814,15 @@ describe('Retry-After header handling', () => {
       'GET'
     ).catch(() => { /* expected */ });
 
-    await flushMicrotasks();
+    await flush();
     await p;
 
     assert.equal(calls, 1, 'should give up when Retry-After exceeds maxRetryAfter');
-    t.mock.timers.reset();
+    resetTimers();
   });
 
   it('negative Retry-After delta-seconds clamped to 0 and retries', async (t) => {
-    t.mock.timers.enable({ apis: ['setTimeout'] });
+    enableFakeTimers(t);
     let calls = 0;
 
     const p = executeWithRetry(
@@ -876,13 +839,13 @@ describe('Retry-After header handling', () => {
       'GET'
     ).catch(() => { /* expected */ });
 
-    await flushMicrotasks();
-    t.mock.timers.tick(0); // 0ms after clamp
-    await flushMicrotasks();
+    await flush();
+    await tick(0);
+    await flush();
     await p;
 
     assert.equal(calls, 2, 'negative Retry-After clamped to 0 should still retry');
-    t.mock.timers.reset();
+    resetTimers();
   });
 });
 
@@ -892,7 +855,7 @@ describe('Retry-After header handling', () => {
 
 describe('SEC-001: fail-safe method gate when no method is known', () => {
   it('network error with no method context → does NOT retry (fail-safe)', async (t) => {
-    t.mock.timers.enable({ apis: ['setTimeout'] });
+    enableFakeTimers(t);
     const networkErr = Object.assign(new Error('connection reset'), { code: 'ECONNRESET' });
     let calls = 0;
 
@@ -904,15 +867,15 @@ describe('SEC-001: fail-safe method gate when no method is known', () => {
       { maxAttempts: 3, initialDelay: 0, jitter: 'none' }
     ).catch(() => { /* expected */ });
 
-    await flushMicrotasks();
+    await flush();
     await p;
 
     assert.equal(calls, 1, 'unknown method → fail-safe → no retry (SEC-001)');
-    t.mock.timers.reset();
+    resetTimers();
   });
 
   it('timeout with no method context → does NOT retry (fail-safe)', async (t) => {
-    t.mock.timers.enable({ apis: ['setTimeout'] });
+    enableFakeTimers(t);
     let calls = 0;
 
     const p = executeWithRetry(
@@ -927,12 +890,12 @@ describe('SEC-001: fail-safe method gate when no method is known', () => {
       { maxAttempts: 3, timeout: 30, jitter: 'none', initialDelay: 0 }
     ).catch(() => { /* expected */ });
 
-    await flushMicrotasks();
-    t.mock.timers.tick(30); // fire the timeout
-    await flushMicrotasks();
+    await flush();
+    await tick(30);
+    await flush();
     await p;
 
     assert.equal(calls, 1, 'unknown method on timeout → fail-safe → no retry (SEC-001)');
-    t.mock.timers.reset();
+    resetTimers();
   });
 });
