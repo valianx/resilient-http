@@ -13,11 +13,11 @@
  * - executeWithRetry / executeWithRetryAndSignal (retry engine)
  * - RequestBuilder (request construction)
  * - runRequestHooks / runResponseHooks / runRetryObservers / runFailureObservers
- * - classifyError / isRetryableError / classifyError
+ * - classifyError / isRetryableError
  * - extractMessageFromBody
  * - buildAttemptSignal / isCallerAbort
- * - backoff/jitter primitives (still available via the ./core sub-path for advanced use)
- * - sleep / sleepWithAbort / randomBetween (available via ./utils sub-path)
+ * - backoff/jitter primitives
+ * - sleep / sleepWithAbort / randomBetween
  *
  * @packageDocumentation
  */
