@@ -101,6 +101,49 @@ interface ErrorMetadata {
   code?: string;
 }
 
+/**
+ * Read the Retry-After header value from a headers source.
+ *
+ * Accepts either a native Headers object (uses .get()) or a plain record
+ * object (iterates keys case-insensitively). Returns the raw string or
+ * undefined when the header is absent.
+ */
+function readRetryAfterHeader(
+  headers: Headers | Record<string, string>
+): string | undefined {
+  // Native Headers API: always use .get() — it is case-insensitive per spec.
+  if (typeof (headers as Headers).get === 'function') {
+    return (headers as Headers).get('retry-after') ?? undefined;
+  }
+
+  // Plain record: iterate keys with case-insensitive comparison.
+  // headersToRecord() produces lowercase keys via Headers.forEach, but we
+  // defend against any casing to make this robust regardless of origin.
+  const rec = headers as Record<string, string>;
+  for (const key of Object.keys(rec)) {
+    if (key.toLowerCase() === 'retry-after') return rec[key];
+  }
+  return undefined;
+}
+
+/**
+ * Parse a Retry-After header value to milliseconds.
+ * Supports delta-seconds (RFC 9110 §10.2.4) and HTTP-date formats.
+ * Returns undefined when the value cannot be parsed.
+ */
+function parseRetryAfterMs(ra: string): number | undefined {
+  const seconds = Number(ra);
+  if (Number.isFinite(seconds)) {
+    // Delta-seconds format: clamp negatives to 0.
+    return Math.max(0, seconds * 1000);
+  }
+
+  // HTTP-date format: parse absolute date.
+  // A hostile far-future date is capped by maxRetryAfter downstream.
+  const when = Date.parse(ra);
+  return Number.isFinite(when) ? Math.max(0, when - Date.now()) : undefined;
+}
+
 function extractMetadata(error: unknown): ErrorMetadata {
   if (!error || typeof error !== 'object') return {};
 
@@ -114,23 +157,23 @@ function extractMetadata(error: unknown): ErrorMetadata {
 
   if (response) {
     statusCode = (response.status ?? response.statusCode) as number | undefined;
-    const headers = response.headers as Record<string, string> | undefined;
-    if (headers) {
-      const ra = headers['retry-after'] ?? headers['Retry-After'];
-      if (ra) {
-        const seconds = Number(ra);
-        if (Number.isFinite(seconds)) {
-          // Delta-seconds format (RFC 9110 §10.2.4): clamp negatives to 0.
-          retryAfterMs = Math.max(0, seconds * 1000);
-        } else {
-          // HTTP-date format (RFC 9110 §10.2.4): parse absolute date.
-          // A hostile far-future date is capped by maxRetryAfter downstream.
-          const when = Date.parse(ra);
-          retryAfterMs = Number.isFinite(when)
-            ? Math.max(0, when - Date.now())
-            : undefined;
-        }
-      }
+    const headers = response.headers as Headers | Record<string, string> | undefined;
+    if (headers && typeof headers === 'object') {
+      // fix(retry-after): use case-insensitive header lookup that handles both
+      // native Headers objects and plain record objects produced by headersToRecord.
+      const ra = readRetryAfterHeader(headers);
+      if (ra) retryAfterMs = parseRetryAfterMs(ra);
+    }
+  }
+
+  // fix(retry-after): ResilientHttpError exposes headers directly on the error
+  // object (not nested under .response). Read them when .response is absent or
+  // when retryAfterMs was not resolved from response.headers.
+  if (retryAfterMs === undefined) {
+    const directHeaders = e.headers as Headers | Record<string, string> | undefined;
+    if (directHeaders && typeof directHeaders === 'object') {
+      const ra = readRetryAfterHeader(directHeaders);
+      if (ra) retryAfterMs = parseRetryAfterMs(ra);
     }
   }
 

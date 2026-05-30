@@ -854,6 +854,252 @@ describe('Retry-After header handling', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Retry-After: ResilientHttpError shape (headers on root, no .response field)
+// This is the regression suite for the bug where retry-after was silently
+// ignored because extractMetadata only read e.response.headers, but
+// ResilientHttpError exposes headers directly as e.headers.
+// ---------------------------------------------------------------------------
+
+describe('Retry-After: headers on root error object (ResilientHttpError shape)', () => {
+  /**
+   * Build an error object that matches the shape ResilientHttpError produces:
+   * statusCode and headers at the root, no nested .response.
+   */
+  function makeResilientLikeError(opts: {
+    statusCode: number;
+    headers: Record<string, string>;
+    method?: string;
+  }): Error & Record<string, unknown> {
+    const err = new Error('rate limited') as Error & Record<string, unknown>;
+    err['statusCode'] = opts.statusCode;
+    err['headers'] = opts.headers;
+    if (opts.method) err['config'] = { method: opts.method };
+    return err;
+  }
+
+  it('respects retry-after (lowercase key) when headers are on error root', async (t) => {
+    enableFakeTimers(t);
+    let calls = 0;
+    const delays: number[] = [];
+    let lastDelayArg = 0;
+
+    const p = executeWithRetry(
+      async () => {
+        calls++;
+        throw makeResilientLikeError({
+          statusCode: 429,
+          headers: { 'retry-after': '0' },
+        });
+      },
+      {
+        maxAttempts: 2,
+        respectRetryAfter: true,
+        maxRetryAfter: 60000,
+        jitter: 'none',
+        retryableMethods: ['GET'],
+        onRetry: (_err, _attempt, delay) => { lastDelayArg = delay; delays.push(delay); },
+      },
+      'GET'
+    ).catch(() => { /* expected exhaustion */ });
+
+    await flush();
+    await tick(0);
+    await flush();
+    await p;
+
+    assert.equal(calls, 2, 'should retry with root-level headers');
+    assert.equal(delays.length, 1, 'onRetry called once');
+    assert.equal(lastDelayArg, 0, 'delay should be 0ms from retry-after:0');
+    resetTimers();
+  });
+
+  it('respects retry-after with mixed-case key (Retry-After) on error root', async (t) => {
+    enableFakeTimers(t);
+    let calls = 0;
+    let capturedDelay = -1;
+
+    const p = executeWithRetry(
+      async () => {
+        calls++;
+        throw makeResilientLikeError({
+          statusCode: 429,
+          headers: { 'Retry-After': '0' }, // original casing preserved by some code paths
+        });
+      },
+      {
+        maxAttempts: 2,
+        respectRetryAfter: true,
+        maxRetryAfter: 60000,
+        jitter: 'none',
+        retryableMethods: ['GET'],
+        onRetry: (_err, _attempt, delay) => { capturedDelay = delay; },
+      },
+      'GET'
+    ).catch(() => { /* expected */ });
+
+    await flush();
+    await tick(0);
+    await flush();
+    await p;
+
+    assert.equal(calls, 2, 'should retry when Retry-After key is capitalized');
+    assert.equal(capturedDelay, 0, 'should read the value regardless of key casing');
+    resetTimers();
+  });
+
+  it('gives up when root-level retry-after exceeds maxRetryAfter', async (t) => {
+    enableFakeTimers(t);
+    let calls = 0;
+
+    const p = executeWithRetry(
+      async () => {
+        calls++;
+        throw makeResilientLikeError({
+          statusCode: 429,
+          headers: { 'retry-after': '120' }, // 120s > 60s cap
+        });
+      },
+      {
+        maxAttempts: 3,
+        respectRetryAfter: true,
+        maxRetryAfter: 60000,
+        jitter: 'none',
+        retryableMethods: ['GET'],
+      },
+      'GET'
+    ).catch(() => { /* expected */ });
+
+    await flush();
+    await p;
+
+    assert.equal(calls, 1, 'should give up when root-level retry-after exceeds cap');
+    resetTimers();
+  });
+
+  it('with respectRetryAfter:false ignores root-level retry-after and uses backoff', async (t) => {
+    enableFakeTimers(t);
+    let calls = 0;
+    let capturedDelay = -1;
+
+    const p = executeWithRetry(
+      async () => {
+        calls++;
+        throw makeResilientLikeError({
+          statusCode: 429,
+          headers: { 'retry-after': '9999' }, // enormous value — should be ignored
+        });
+      },
+      {
+        maxAttempts: 2,
+        respectRetryAfter: false,
+        initialDelay: 0,
+        jitter: 'none',
+        retryableMethods: ['GET'],
+        onRetry: (_err, _attempt, delay) => { capturedDelay = delay; },
+      },
+      'GET'
+    ).catch(() => { /* expected */ });
+
+    await flush();
+    await tick(0);
+    await flush();
+    await p;
+
+    assert.equal(calls, 2, 'should retry regardless of large retry-after when disabled');
+    assert.equal(capturedDelay, 0, 'delay should be backoff (0ms), not from header');
+    resetTimers();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Retry-After: native Headers object in e.response.headers
+// Guards against the browser fetch path where headers may arrive as a
+// native Headers instance rather than a plain record.
+// ---------------------------------------------------------------------------
+
+describe('Retry-After: native Headers object in e.response.headers', () => {
+  function makeErrorWithNativeHeaders(opts: {
+    statusCode: number;
+    nativeHeaders: Headers;
+  }): Error & Record<string, unknown> {
+    const err = new Error('rate limited') as Error & Record<string, unknown>;
+    err['response'] = {
+      status: opts.statusCode,
+      headers: opts.nativeHeaders,
+    };
+    return err;
+  }
+
+  it('reads retry-after from native Headers object in e.response.headers', async (t) => {
+    enableFakeTimers(t);
+    let calls = 0;
+    let capturedDelay = -1;
+
+    const nativeHeaders = new Headers({ 'retry-after': '0', 'content-type': 'application/json' });
+
+    const p = executeWithRetry(
+      async () => {
+        calls++;
+        throw makeErrorWithNativeHeaders({ statusCode: 429, nativeHeaders });
+      },
+      {
+        maxAttempts: 2,
+        respectRetryAfter: true,
+        maxRetryAfter: 60000,
+        jitter: 'none',
+        retryableMethods: ['GET'],
+        onRetry: (_err, _attempt, delay) => { capturedDelay = delay; },
+      },
+      'GET'
+    ).catch(() => { /* expected */ });
+
+    await flush();
+    await tick(0);
+    await flush();
+    await p;
+
+    assert.equal(calls, 2, 'should retry when retry-after is in a native Headers object');
+    assert.equal(capturedDelay, 0, 'delay should be from retry-after header value');
+    resetTimers();
+  });
+
+  it('reads Retry-After with original casing from native Headers (Headers is case-insensitive)', async (t) => {
+    enableFakeTimers(t);
+    let calls = 0;
+    let capturedDelay = -1;
+
+    // new Headers normalizes keys to lowercase internally — this test
+    // confirms .get('retry-after') works regardless of input casing.
+    const nativeHeaders = new Headers({ 'Retry-After': '0' });
+
+    const p = executeWithRetry(
+      async () => {
+        calls++;
+        throw makeErrorWithNativeHeaders({ statusCode: 429, nativeHeaders });
+      },
+      {
+        maxAttempts: 2,
+        respectRetryAfter: true,
+        maxRetryAfter: 60000,
+        jitter: 'none',
+        retryableMethods: ['GET'],
+        onRetry: (_err, _attempt, delay) => { capturedDelay = delay; },
+      },
+      'GET'
+    ).catch(() => { /* expected */ });
+
+    await flush();
+    await tick(0);
+    await flush();
+    await p;
+
+    assert.equal(calls, 2);
+    assert.equal(capturedDelay, 0, 'native Headers .get() is case-insensitive');
+    resetTimers();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // SEC-001: no-method fail-safe (double-charge prevention)
 // ---------------------------------------------------------------------------
 

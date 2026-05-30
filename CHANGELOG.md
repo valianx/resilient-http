@@ -1,5 +1,31 @@
 # Changelog
 
+## 2.0.2
+
+### Patch Changes
+
+- fix: respect Retry-After header when using createResilientHttp with fetch
+
+  The `respectRetryAfter` option was silently ignored when the 429 response
+  came through `createResilientHttp`. The internal `extractMetadata` function
+  in the retry engine only searched for `retry-after` inside `e.response.headers`
+  (the Axios-style error shape), but `ResilientHttpError` — the error class the
+  client throws — exposes headers directly at `e.headers` with no nested
+  `.response` wrapper. As a result, `retryAfterMs` was always `undefined` and
+  the engine fell back to the configured backoff delay instead of the header value.
+
+  Changes:
+  - `extractMetadata` now also reads `e.headers` directly when `e.response.headers`
+    is absent, covering the `ResilientHttpError` shape produced by the built-in client.
+  - Header lookup is now case-insensitive in both code paths: native `Headers`
+    objects are queried via `.get()` (spec-guaranteed case-insensitive), and plain
+    record objects are searched by iterating keys with `.toLowerCase()` comparison.
+  - The delta-seconds and HTTP-date parsing logic is extracted into a shared
+    `parseRetryAfterMs` helper, eliminating the previous duplication.
+  - Added regression tests that exercise `respectRetryAfter` with errors carrying
+    headers on the root object (ResilientHttpError shape) and with native `Headers`
+    objects in `e.response.headers`.
+
 ## 2.0.1
 
 ### Patch Changes
