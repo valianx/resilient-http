@@ -238,6 +238,27 @@ function resolveRequestConfig(
   // Retry: per-request overrides instance-level.
   const retry = mergeRetryOptions(instanceOptions.retry, cfg.retry);
 
+  // fix(timeout): inject top-level timeout/deadline into retry options.
+  // ResilientHttpOptions and RequestConfig both expose `timeout` and `deadline`
+  // as top-level fields (not nested inside `retry:{}`). The engine reads them
+  // from `retryOptions.timeout` / `retryOptions.deadline` via resolveConfig().
+  // Without this propagation, buildAttemptSignal receives undefined for both
+  // fields and never wires the AbortSignal to the real fetch call.
+  //
+  // Precedence (highest → lowest):
+  //   1. per-request top-level  cfg.timeout / cfg.deadline
+  //   2. instance top-level     instanceOptions.timeout / instanceOptions.deadline
+  //   3. retry sub-object       retry.timeout / retry.deadline  (already merged above)
+  //
+  // Only fill in when the retry sub-objects did not already specify a value.
+  const effectiveTimeout =
+    cfg.timeout ?? instanceOptions.timeout ?? retry.timeout;
+  const effectiveDeadline =
+    cfg.deadline ?? instanceOptions.deadline ?? retry.deadline;
+
+  if (effectiveTimeout !== undefined) retry.timeout = effectiveTimeout;
+  if (effectiveDeadline !== undefined) retry.deadline = effectiveDeadline;
+
   // Hooks: concatenated, instance first.
   const hooks = mergeHooks(instanceOptions.hooks, cfg.hooks);
 

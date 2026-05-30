@@ -44,7 +44,11 @@ export function classifyError(
     if (
       errorCode === 'ETIMEDOUT' ||
       errorCode === 'ECONNABORTED' ||
-      errorCode === 'UND_ERR_CONNECT_TIMEOUT'
+      errorCode === 'UND_ERR_CONNECT_TIMEOUT' ||
+      // fix(timeout): TIMEOUT_ERR is the code set by wrapNetworkError when the
+      // underlying cause is a DOMException{name:'TimeoutError'} (produced by
+      // buildAttemptSignal when the per-attempt AbortController fires).
+      errorCode === 'TIMEOUT_ERR'
     ) {
       return 'timeout';
     }
