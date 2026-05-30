@@ -23,6 +23,7 @@ or feature family in isolation, so you can read any file independently.
 | `14-hooks.ts` | `onRequest` (mutator), `onResponse`, `onRetry`, `onFailure` observers |
 | `15-idempotency-key.ts` | `true` / static string / factory function frozen across retries |
 | `16-headers-and-logger.ts` | Instance + per-request header merge, `Logger` interface |
+| `17-composing-a-resilient-preset.ts` | Combining timeout, deadline, maxRetryAfter, retryableMethods, and idempotencyKey into a preset for a retry-sensitive operation |
 
 ## Philosophy
 
