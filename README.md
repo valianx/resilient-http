@@ -112,6 +112,20 @@ Each file demonstrates one tool or feature in isolation.
 | [`15-idempotency-key.ts`](./docs/use-cases/15-idempotency-key.ts) | `true` / static string / factory function frozen across retries |
 | [`16-headers-and-logger.ts`](./docs/use-cases/16-headers-and-logger.ts) | Instance + per-request header merge, `Logger` interface |
 | [`17-composing-a-resilient-preset.ts`](./docs/use-cases/17-composing-a-resilient-preset.ts) | Combining timeout, deadline, maxRetryAfter, retryableMethods, and idempotencyKey into a preset for a retry-sensitive operation |
+| [`18-oauth-token-refresh.ts`](./docs/use-cases/18-oauth-token-refresh.ts) | Auto-refresh a bearer token on 401 via `onRequest` hook + `ctx.meta` guard |
+| [`19-opentelemetry-tracing.ts`](./docs/use-cases/19-opentelemetry-tracing.ts) | Inject W3C `traceparent` / `tracestate` per attempt using `ctx.requestId` and `ctx.attemptId` |
+| [`20-request-correlation.ts`](./docs/use-cases/20-request-correlation.ts) | Propagate `X-Request-Id` across all retry attempts; log it in `onRetry` / `onFailure` |
+| [`21-userland-circuit-breaker.ts`](./docs/use-cases/21-userland-circuit-breaker.ts) | Userland open/half-open/closed breaker composed around the client |
+| [`22-rate-limit-aware.ts`](./docs/use-cases/22-rate-limit-aware.ts) | Handle 429 with `respectRetryAfter` + `maxRetryAfter` cap |
+| [`23-concurrency-limit.ts`](./docs/use-cases/23-concurrency-limit.ts) | Bound in-flight requests with a userland semaphore (bulkhead) |
+| [`24-pagination.ts`](./docs/use-cases/24-pagination.ts) | Paginate cursor-based and offset-based APIs with per-page retry |
+| [`25-streaming-download.ts`](./docs/use-cases/25-streaming-download.ts) | Download a large body as `ReadableStream` with `responseType:'stream'` |
+| [`26-file-upload.ts`](./docs/use-cases/26-file-upload.ts) | Upload `Uint8Array` / JSON body with retry; stream-body trade-off |
+| [`27-graphql-client.ts`](./docs/use-cases/27-graphql-client.ts) | Resilient GraphQL POST — detect application-level errors in a 200 response |
+| [`28-bff-proxy.ts`](./docs/use-cases/28-bff-proxy.ts) | BFF proxy — sanitize upstream errors before returning to an untrusted client |
+| [`29-webhook-delivery.ts`](./docs/use-cases/29-webhook-delivery.ts) | Deliver webhook events with retry, idempotency key, and `onFailure` audit |
+| [`30-nestjs-provider.ts`](./docs/use-cases/30-nestjs-provider.ts) | NestJS `useFactory` provider + injection token; test-swap pattern |
+| [`31-testing-with-mock-fetch.ts`](./docs/use-cases/31-testing-with-mock-fetch.ts) | Test your code with a `config.fetch` mock — assert attempts, headers, errors |
 
 ---
 
