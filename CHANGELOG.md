@@ -1,5 +1,23 @@
 # Changelog
 
+## 2.0.1
+
+### Patch Changes
+
+- fix: `timeout` now aborts the underlying fetch (was a no-op in 2.0.0)
+
+  The per-attempt `timeout` (and `deadline`) configured at the top level of
+  `createResilientHttp(options)` or per request were never propagated into the
+  retry engine's signal composition, so the `AbortSignal.timeout` never reached
+  the real `fetch`. A request to a slow upstream hung for the full response time
+  instead of aborting at the configured `timeout`.
+
+  Now the composed abort signal (caller + per-attempt timeout + deadline) is
+  forwarded to `fetch`, and a timed-out attempt rejects with
+  `ResilientHttpError { kind: 'network', classification: 'timeout' }`.
+
+  Detected by the end-to-end consumer suite running against real HTTP endpoints.
+
 All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),

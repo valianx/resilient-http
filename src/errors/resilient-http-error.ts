@@ -193,6 +193,11 @@ function resolveNetworkCode(cause: unknown, explicit?: string): string | undefin
   // AbortError from the Fetch API or Node's AbortController
   if (c['name'] === 'AbortError') return 'ABORT_ERR';
 
+  // fix(timeout): TimeoutError from AbortSignal.timeout() or buildAttemptSignal
+  // when no explicit code is provided. Maps to 'TIMEOUT_ERR' so classifyError
+  // produces classification:'timeout' per the StandardizedError contract.
+  if (c['name'] === 'TimeoutError') return 'TIMEOUT_ERR';
+
   if (typeof c['code'] === 'string') return c['code'];
   return undefined;
 }
