@@ -10,7 +10,7 @@ Works with **Node.js 24+**, **Bun 1.0+**, and browsers (ESM).
 - **Jitter Algorithms**: Full, equal, decorrelated, and none (prevents thundering herd)
 - **Safe Errors**: `ResilientHttpError` with three kinds, safe-by-default `toJSON()`, and a global brand that survives duplicate module installs
 - **Hook System**: `onRequest / onResponse / onRetry / onFailure` interceptors
-- **Idempotency Keys**: Frozen per logical operation — safe for payment retries
+- **Idempotency Keys**: Frozen per logical operation — all retry attempts reuse the same key
 - **Zero Dependencies**: No external runtime dependencies
 - **TypeScript First**: Full type definitions included
 
@@ -41,151 +41,9 @@ const { data, status } = await client.get<{ id: number; name: string }>('/users/
 console.log(status, data?.name);
 ```
 
-## Configuration
-
-### Instance options (`ResilientHttpOptions`)
-
-Passed once to `createResilientHttp()` — become the defaults for every request.
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `baseURL` | `string` | — | Prepended to every relative request URL |
-| `headers` | `Record<string, string>` | `{}` | Default headers for every request |
-| `timeout` | `number` (ms) | — | Per-attempt timeout; no new attempt starts after expiry |
-| `deadline` | `number` (ms epoch) | — | Absolute deadline; no new attempt starts after `Date.now() >= deadline` |
-| `retry` | `RetryOptions` | `{}` | Retry configuration (see below) |
-| `hooks` | `HookSet` | `{}` | Lifecycle hooks |
-| `responseType` | `ResponseType` | `'auto'` | Body parsing mode |
-| `validateStatus` | `(s: number) => boolean` | `s >= 200 && s < 300` | Custom success predicate |
-| `fetch` | `typeof globalThis.fetch` | `globalThis.fetch` | Inject a custom fetch (tests, edge runtimes, etc.) |
-| `logger` | `Logger` | — | Receives internal warnings (e.g. retry without timeout) |
-| `redactHeaders` | `string[]` | `[]` | Additional header names to redact in `toJSON()` output |
-| `redactQueryParams` | `string[]` | `[]` | Query param names whose values are hidden in `toJSON()` url |
-| `idempotencyKey` | `true \| string \| () => string` | — | Idempotency key applied to all requests (see Payment Preset) |
-| `idempotencyHeader` | `string` | `'Idempotency-Key'` | Custom header name for the key |
-
-### Per-request overrides (`RequestConfig`)
-
-Every method accepts an optional `RequestConfig` that overrides the instance options for that request only.
-
-```typescript
-const { data } = await client.post<Order>('/orders', {
-  json: { item: 'widget', qty: 1 },          // JSON body (sets Content-Type automatically)
-  retry: { maxAttempts: 1 },                  // override: no retry for this request
-  timeout: 10_000,                            // override: longer timeout
-  headers: { 'X-Trace-Id': traceId },        // merged with instance headers
-  params: { dryRun: true },                   // appended as query string
-  signal: controller.signal,                  // composed with timeout/deadline signal
-});
-```
-
-### Retry options (`RetryOptions`)
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `maxAttempts` | `number` | `1` | Total attempts (1 = no retry) |
-| `backoff` | `'exponential' \| 'linear' \| 'constant'` | `'exponential'` | Delay growth strategy |
-| `initialDelay` | `number` (ms) | `1000` | Delay before the first retry |
-| `maxDelay` | `number` (ms) | `30000` | Hard cap on any single delay |
-| `multiplier` | `number` | `2` | Backoff multiplier |
-| `jitter` | `'full' \| 'equal' \| 'decorrelated' \| 'none'` | `'full'` | Randomness to prevent thundering herd |
-| `retryableStatuses` | `number[]` | `[408, 429, 500, 502, 503, 504]` | HTTP status codes eligible for retry |
-| `retryableMethods` | `string[]` | `['GET','HEAD','PUT','DELETE','OPTIONS']` | Methods eligible for retry (POST excluded by default) |
-| `respectRetryAfter` | `boolean` | `true` | Honour `Retry-After` response header |
-| `maxRetryAfter` | `number` (ms) | `60000` | Max `Retry-After` the engine will honour; gives up if header exceeds this |
-| `timeout` | `number` (ms) | — | Per-attempt timeout |
-| `deadline` | `number` (ms epoch) | — | Absolute deadline |
-| `shouldRetry` | `(ctx: RetryHookContext) => boolean \| Promise<boolean>` | — | Custom gate (cannot override `maxAttempts` or `deadline`) |
-| `onRetry` | `(error, attempt, delay) => void` | — | Legacy callback before each retry sleep |
-| `onFailure` | `(error, attempts) => void` | — | Callback when all attempts are exhausted |
-
-### Response types (`ResponseType`)
-
-`'auto'` (default) detects from `Content-Type`. Alternatives:
-
-| Value | Parses as |
-|-------|-----------|
-| `'json'` | `JSON.parse()` |
-| `'text'` | `response.text()` |
-| `'arrayBuffer'` | `response.arrayBuffer()` |
-| `'blob'` | `response.blob()` |
-| `'stream'` | Returns `ReadableStream` without buffering |
-| `'none'` | `data` is `null`; body is not read |
-
-### Hook system (`HookSet`)
-
-Hooks are ordered arrays (instance first, per-request appended). If a hook throws, the request aborts with `ResilientHttpError { kind: 'setup' }`. Observer hooks (`onRetry`, `onFailure`) never propagate — errors are captured internally.
-
-```typescript
-const client = createResilientHttp({
-  hooks: {
-    onRequest: async (ctx) => {
-      // ctx.request is mutable: url, method, headers, body
-      ctx.request.headers['X-Request-Id'] = ctx.requestId;
-    },
-    onResponse: async (ctx) => {
-      // ctx.response is the raw Fetch Response (before validateStatus)
-    },
-    onRetry: (error, attempt, delay) => {
-      console.warn(`Retry ${attempt} in ${delay}ms`, error);
-    },
-    onFailure: (error, attempts) => {
-      console.error(`Failed after ${attempts} attempts`, error);
-    },
-  },
-});
-```
-
----
-
-## Payment-safe preset
-
-> Copy-paste this when calling any payment or billing endpoint.
-
-```typescript
-import { createResilientHttp } from 'resilient-http';
-import { randomUUID } from 'node:crypto';
-
-const paymentClient = createResilientHttp({
-  baseURL: process.env['PAYMENT_API_URL'],
-  timeout: 10_000,
-  deadline: Date.now() + 25_000,    // hard wall: never exceed 25 s total
-  retry: {
-    maxAttempts: 3,
-    backoff: 'exponential',
-    jitter: 'full',
-    // Limit Retry-After to 5 s — a provider asking for 60 s is a yellow flag
-    maxRetryAfter: 5_000,
-    // Only retry idempotent methods (POST excluded by default — critical!)
-    retryableMethods: ['GET', 'HEAD', 'PUT', 'DELETE'],
-  },
-  // One key per logical operation, frozen for all retries.
-  // If this were () => randomUUID(), each retry would get a NEW key
-  // and the processor would treat them as separate charges.
-  idempotencyKey: () => randomUUID(),
-  redactQueryParams: ['token', 'signature', 'api_key'],
-  headers: {
-    'Content-Type': 'application/json',
-  },
-});
-
-// Use PUT (idempotent) when the endpoint supports it.
-// For POST endpoints, confirm server-side idempotency via idempotencyKey.
-const { data } = await paymentClient.put<ChargeResult>('/charges/ch_123/capture', {
-  json: { amount: 1000, currency: 'usd' },
-});
-```
-
-Why each setting matters:
-
-- **`timeout` + `deadline`**: prevents a slow payment gateway from hanging a request indefinitely. `timeout` caps each attempt; `deadline` caps the total operation.
-- **`maxRetryAfter`**: a provider sending `Retry-After: 60` under load should not make your request wait a full minute — set a ceiling and give up early if the provider is degraded.
-- **`retryableMethods` without POST**: POST is excluded by default because it is not idempotent. Only retry methods the server treats as safe to repeat.
-- **`idempotencyKey: () => randomUUID()`**: the function is called **once** and the result is frozen for every retry attempt. This is what prevents double-charges. A pattern like `idempotencyKey: randomUUID()` (calling at config time) would use the same key for the lifetime of the client — also wrong for multi-request scenarios.
-
----
-
 ## Error handling
+
+Every failure throws a `ResilientHttpError` with one of three kinds:
 
 ```typescript
 import { createResilientHttp, isResilientHttpError } from 'resilient-http';
@@ -196,118 +54,64 @@ try {
   const { data } = await client.get('/resource');
 } catch (err) {
   if (isResilientHttpError(err)) {
-    // Three kinds of errors:
     if (err.kind === 'response') {
       // Server replied with a non-2xx status
       console.error(err.statusCode, err.classification, err.isRetryable);
     } else if (err.kind === 'network') {
       // Request never reached the server (ECONNREFUSED, abort, timeout, etc.)
-      console.error(err.code); // e.g. 'ECONNREFUSED', 'ABORT_ERR', 'TIMEOUT_ERR'
+      console.error(err.code);
     } else {
       // kind === 'setup': error constructing the request (bad body, hook threw, etc.)
       console.error(err.message);
     }
 
     // Log-safe representation: body, cause, and meta are excluded
-    const logPayload = err.toJSON();
-    myLogger.error('request failed', logPayload);
-  } else {
-    throw err;
+    myLogger.error('request failed', err.toJSON());
   }
 }
 ```
 
-### `ResilientHttpError` properties
+Use `isResilientHttpError(e)` — not `instanceof` — so the check works correctly even
+when multiple copies of the package are installed (monorepos, version conflicts).
 
-| Property | Type | Description |
-|----------|------|-------------|
-| `kind` | `'response' \| 'network' \| 'setup'` | When/where the error occurred |
-| `message` | `string` | Human-readable summary (capped at 512 chars) |
-| `classification` | `ErrorClassification` | `'network' \| 'timeout' \| 'server' \| 'rate-limit' \| 'client' \| 'authentication' \| 'not-found' \| 'validation' \| 'cancelled' \| 'unknown'` |
-| `isRetryable` | `boolean` | Built-in retryability assessment |
-| `attempts` | `number` | Total attempts before this error |
-| `statusCode` | `number \| undefined` | HTTP status (kind:'response' only) |
-| `method` | `string \| undefined` | HTTP method |
-| `url` | `string \| undefined` | Request URL (raw — see redaction note) |
-| `headers` | `Record<string, string> \| undefined` | Response headers (kind:'response') |
-| `body` | `unknown` | Raw response body (present on instance; excluded from `toJSON()`) |
-| `code` | `string \| undefined` | Network error code (kind:'network') |
-| `requestId` | `string \| undefined` | Stable ID for the logical operation |
-| `attemptId` | `string \| undefined` | ID for the specific attempt |
-
-### `isResilientHttpError(e)` — the right way to detect errors
-
-Always prefer `isResilientHttpError(e)` over `e instanceof ResilientHttpError`. The guard uses `Symbol.for('resilient-http.error')` (a global-registry symbol), so it works correctly even when multiple copies of the package are installed (monorepos, version conflicts). `instanceof` breaks in those scenarios.
-
-### `toJSON()` — safe by default
-
-`toJSON()` is intentionally conservative — it never includes `body`, `cause`, or `meta`. This prevents secrets, PII, or large response payloads from leaking into logs or BFF wire responses.
-
-```typescript
-// SAFE: send to your logging infra directly
-logger.error('payment failed', err.toJSON());
-
-// ALSO SAFE with query param redaction enabled at instance level
-// (redactQueryParams: ['token', 'api_key'] in createResilientHttp options)
-logger.error('payment failed', err.toJSON()); // url field will have values redacted
-```
-
-### BFF / Next.js pattern — sanitize before sending to clients
-
-`err.message` is derived from the server response body. A malicious or misbehaving upstream can inject content into the message. When your BFF forwards error details to an untrusted client (browser, mobile app), always map the message — never forward the raw `err.message`:
-
-```typescript
-// pages/api/charge.ts (Next.js API Route or App Router Route Handler)
-import { isResilientHttpError } from 'resilient-http';
-
-export async function POST(req: Request) {
-  try {
-    const result = await paymentClient.post('/charges', { json: await req.json() });
-    return Response.json(result.data);
-  } catch (err) {
-    if (isResilientHttpError(err)) {
-      // Log full context internally (body/cause omitted by toJSON() automatically)
-      logger.error('charge failed', err.toJSON());
-
-      // Return a safe, controlled message to the browser
-      // DO NOT forward err.message — it is server-influenced and may contain
-      // injection content, internal paths, or upstream error details.
-      const clientMessage = err.kind === 'network'
-        ? 'Service temporarily unavailable'
-        : `Request failed with status ${err.statusCode ?? 'unknown'}`;
-
-      return Response.json(
-        { error: clientMessage },
-        { status: err.statusCode ?? 502 }
-      );
-    }
-    throw err;
-  }
-}
-```
+`toJSON()` is safe by default: it never includes `body`, `cause`, or `meta`, preventing
+secrets or large payloads from leaking into logs. See the full error reference and the
+BFF sanitization pattern in [docs/configuration.md](./docs/configuration.md#error-handling--resilienthttperror).
 
 ---
 
-## Header redaction denylist
+## Documentation
 
-The following headers are **always** redacted in `toJSON()` output, regardless of configuration:
+### [docs/configuration.md](./docs/configuration.md) — Full configuration reference
 
-```
-authorization
-cookie
-set-cookie
-x-api-key
-proxy-authorization
-authentication
-x-auth-token
-x-api-token
-api-key
-www-authenticate
-```
+All options with types, defaults, and descriptions:
+instance options (`ResilientHttpOptions`), per-request overrides (`RequestConfig`),
+retry options (`RetryOptions`), response types, hook system, error properties,
+redaction denylist.
 
-Additional names can be added per-instance via `redactHeaders: ['x-my-secret']`.
+### [docs/use-cases/](./docs/use-cases/) — Runnable examples
 
-**Note on URL redaction:** The `url` field in `toJSON()` is emitted **without** query-param redaction unless you configure `redactQueryParams` on the instance. For payment endpoints whose URLs contain tokens or signatures, always set `redactQueryParams: ['token', 'signature', ...]` at the instance level. This is a known follow-up: the base denylist covers headers only; URL query params are opt-in.
+Each file demonstrates one tool or feature in isolation.
+
+| File | Tool / feature illustrated |
+|---|---|
+| [`01-quickstart.ts`](./docs/use-cases/01-quickstart.ts) | Minimal client setup — `createResilientHttp` + a single GET |
+| [`02-http-methods.ts`](./docs/use-cases/02-http-methods.ts) | All seven HTTP method shortcuts and the generic `request()` escape-hatch |
+| [`03-base-url-and-params.ts`](./docs/use-cases/03-base-url-and-params.ts) | `baseURL` + query-string `params` composition |
+| [`04-retry-and-method-gate.ts`](./docs/use-cases/04-retry-and-method-gate.ts) | `maxAttempts`, default method gate (POST not retried), explicit opt-in |
+| [`05-backoff-strategies.ts`](./docs/use-cases/05-backoff-strategies.ts) | Exponential / linear / constant backoff formulas and defaults |
+| [`06-jitter.ts`](./docs/use-cases/06-jitter.ts) | Full / equal / decorrelated / none jitter strategies |
+| [`07-should-retry.ts`](./docs/use-cases/07-should-retry.ts) | `shouldRetry` custom gate — fail-closed contract when it throws |
+| [`08-retry-after.ts`](./docs/use-cases/08-retry-after.ts) | Retry-After header honoring (429 only), `maxRetryAfter` cap, give-up |
+| [`09-timeout-and-deadline.ts`](./docs/use-cases/09-timeout-and-deadline.ts) | Per-attempt `timeout`, total `deadline`, and caller `AbortSignal` |
+| [`10-response-types.ts`](./docs/use-cases/10-response-types.ts) | `responseType` modes: auto / json / text / arrayBuffer / blob / stream / none |
+| [`11-validate-status.ts`](./docs/use-cases/11-validate-status.ts) | Custom `validateStatus` — treat 4xx as success, or restrict 2xx range |
+| [`12-errors.ts`](./docs/use-cases/12-errors.ts) | Three error kinds, `ErrorClassification`, `isResilientHttpError`, `toJSON` |
+| [`13-redaction.ts`](./docs/use-cases/13-redaction.ts) | `redactHeaders`, `redactQueryParams`, BFF-safe `toJSON` output |
+| [`14-hooks.ts`](./docs/use-cases/14-hooks.ts) | `onRequest` (mutator), `onResponse`, `onRetry`, `onFailure` observers |
+| [`15-idempotency-key.ts`](./docs/use-cases/15-idempotency-key.ts) | `true` / static string / factory function frozen across retries |
+| [`16-headers-and-logger.ts`](./docs/use-cases/16-headers-and-logger.ts) | Instance + per-request header merge, `Logger` interface |
+| [`17-composing-a-resilient-preset.ts`](./docs/use-cases/17-composing-a-resilient-preset.ts) | Combining timeout, deadline, maxRetryAfter, retryableMethods, and idempotencyKey into a preset for a retry-sensitive operation |
 
 ---
 
