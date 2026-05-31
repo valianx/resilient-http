@@ -139,6 +139,14 @@ See the [CHANGELOG](./CHANGELOG.md) for the full breaking-changes list.
 
 ---
 
+## Contributing
+
+Contributions are welcome. Please read [CONTRIBUTING.md](./CONTRIBUTING.md) for
+setup, conventions, and the PR process, and [ROADMAP.md](./ROADMAP.md) for what
+is planned and what is deliberately out of scope. The library is
+business-agnostic and zero-dependency by design — orchestration patterns belong
+in consumer code (see [`docs/use-cases/`](./docs/use-cases)).
+
 ## License
 
 MIT
