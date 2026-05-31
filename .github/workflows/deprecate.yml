@@ -1,0 +1,41 @@
+name: Deprecate version
+
+# Manually deprecate (or un-deprecate) a published npm version.
+#
+# Why a workflow: `npm deprecate` is the ONLY way to deprecate a version (the
+# npmjs.com web UI has no button for it), and it requires a write-enabled,
+# 2FA-bypassing token. The repo secret NPM_TOKEN (granular, bypass-2FA) provides
+# that, the same way publish.yml uses it. Run this from the Actions tab.
+#
+# Deprecation is non-destructive and reversible:
+#  - it does NOT remove the version (that is `npm unpublish`);
+#  - it only attaches a warning shown on install;
+#  - to UN-deprecate, run again with an empty message ("").
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to deprecate (e.g. 2.0.0). The package name is fixed to resilient-http.'
+        required: true
+        type: string
+      message:
+        description: 'Deprecation message. Use an empty string to UN-deprecate.'
+        required: true
+        type: string
+        default: 'Deprecated. Please upgrade to the latest 2.0.x.'
+
+jobs:
+  deprecate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Deprecate the requested version
+        run: npm deprecate "resilient-http@${{ inputs.version }}" "${{ inputs.message }}"
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
