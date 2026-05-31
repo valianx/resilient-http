@@ -1,0 +1,32 @@
+version: 2
+
+updates:
+  # Keep the CI / publish GitHub Actions up to date (checkout, setup-node,
+  # pnpm/action-setup, setup-bun, …). Highest-value, lowest-noise updates.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci
+    groups:
+      github-actions:
+        patterns:
+          - '*'
+
+  # Dev tooling only. This package has ZERO runtime dependencies by design, so
+  # Dependabot only ever touches devDependencies (tsup, typescript, eslint,
+  # vitest/bun types, etc.). Grouped into a single weekly PR to avoid churn.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    versioning-strategy: increase
+    commit-message:
+      prefix: chore
+      include: scope
+    groups:
+      dev-dependencies:
+        dependency-type: development
+        patterns:
+          - '*'
