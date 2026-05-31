@@ -180,25 +180,72 @@ function capBody(body: unknown, maxSize: number): unknown {
 }
 
 /**
- * Derive the network error code from the cause object, if available.
- * Handles AbortError (name-based) and Node/undici error objects (code-based).
+ * Maximum number of cause-chain levels inspected when resolving a network code.
+ *
+ * undici nests the real connection-level code two levels deep — the top-level
+ * cause is a TypeError{message:'fetch failed'} whose `.cause` carries `.code`.
+ * 5 gives generous headroom for deeper wrappers while keeping the walk bounded.
+ *
+ * Combined with the cycle guard in resolveNetworkCode, the cap makes the walk
+ * DoS-safe: a self-referential or mutually-referential cause chain terminates
+ * in O(depth) without hanging or overflowing the stack.
  */
-function resolveNetworkCode(cause: unknown, explicit?: string): string | undefined {
-  if (explicit) return explicit;
-  if (cause === null || cause === undefined) return undefined;
-  if (typeof cause !== 'object') return undefined;
+const MAX_CAUSE_DEPTH = 5;
 
-  const c = cause as Record<string, unknown>;
-
+/**
+ * Map a single cause node to a network code, if it carries a recognizable one.
+ *
+ * Name-derived signals (AbortError/TimeoutError) take precedence over a string
+ * `.code` on the same node, preserving the original level-0 resolution order so
+ * timeout/abort behavior is unchanged.
+ */
+function codeFromCauseNode(node: Record<string, unknown>): string | undefined {
   // AbortError from the Fetch API or Node's AbortController
-  if (c['name'] === 'AbortError') return 'ABORT_ERR';
+  if (node['name'] === 'AbortError') return 'ABORT_ERR';
 
   // fix(timeout): TimeoutError from AbortSignal.timeout() or buildAttemptSignal
   // when no explicit code is provided. Maps to 'TIMEOUT_ERR' so classifyError
   // produces classification:'timeout' per the StandardizedError contract.
-  if (c['name'] === 'TimeoutError') return 'TIMEOUT_ERR';
+  if (node['name'] === 'TimeoutError') return 'TIMEOUT_ERR';
 
-  if (typeof c['code'] === 'string') return c['code'];
+  if (typeof node['code'] === 'string') return node['code'];
+  return undefined;
+}
+
+/**
+ * Derive the network error code by walking the cause chain.
+ *
+ * Handles AbortError/TimeoutError (name-based) and Node/undici error objects
+ * (code-based). undici buries a connection-level code (e.g. ECONNREFUSED) at
+ * `cause.cause.code`, so single-level inspection misses it. The walk descends
+ * up to MAX_CAUSE_DEPTH levels and returns the first recognizable signal it
+ * finds at any level.
+ *
+ * fix(network-message): surface a diagnostic code/message for connection-level
+ * failures instead of falling through to the generic 'Network error'. Only the
+ * well-known code is exposed — never host, port, URL, headers, or body.
+ *
+ * DoS-safe: bounded depth + a visited-set cycle guard so a self-referential
+ * `cause` (cause.cause === cause) terminates without hanging or overflowing.
+ */
+function resolveNetworkCode(cause: unknown, explicit?: string): string | undefined {
+  if (explicit) return explicit;
+
+  const visited = new Set<unknown>();
+  let current: unknown = cause;
+
+  for (let depth = 0; depth < MAX_CAUSE_DEPTH; depth++) {
+    if (current === null || current === undefined) return undefined;
+    if (typeof current !== 'object') return undefined;
+    if (visited.has(current)) return undefined; // cycle guard
+    visited.add(current);
+
+    const code = codeFromCauseNode(current as Record<string, unknown>);
+    if (code) return code;
+
+    current = (current as Record<string, unknown>)['cause'];
+  }
+
   return undefined;
 }
 

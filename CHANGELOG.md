@@ -1,5 +1,46 @@
 # Changelog
 
+## 2.0.3
+
+### Patch Changes
+
+- fix: surface nested connection-level error codes in `kind:'network'` messages
+
+  A `ResilientHttpError` of `kind:'network'` produced a generic, low-visibility
+  `message` ("Network error") with `code: undefined` when the underlying failure
+  was a connection-level error (ECONNREFUSED, ENOTFOUND, EHOSTUNREACH, etc.).
+  undici nests the real code two levels deep — the top-level `cause` is a
+  `TypeError{message:'fetch failed'}` whose `.cause` carries `.code` — but
+  `resolveNetworkCode` only inspected the first level, so the code was missed and
+  the message fell through to the generic string. Timeouts were unaffected
+  because `TIMEOUT_ERR` is assigned from the level-0 cause name.
+
+  Changes:
+  - `resolveNetworkCode` now walks the `cause` chain (bounded to 5 levels, with a
+    visited-set cycle guard) and returns the first recognizable signal it finds at
+    any level: a name-derived code (`AbortError` → `ABORT_ERR`, `TimeoutError` →
+    `TIMEOUT_ERR`) or a string `.code`.
+  - A connection refusal now yields `code: 'ECONNREFUSED'`,
+    `classification: 'network'`, `isRetryable: true`, and
+    `message: 'Network error: ECONNREFUSED'`.
+  - The message format is unchanged and never includes host, port, URL, headers,
+    or body — only the well-known error code. The SEC-001 message cap and the
+    safe-by-default `toJSON()` (which still excludes `body`, `cause`, `meta`) are
+    preserved.
+  - Timeout/abort behavior is unchanged: a level-0 `TimeoutError`/`AbortError`
+    still resolves to `TIMEOUT_ERR`/`ABORT_ERR` before any nested code is read.
+  - The cause-chain walk is DoS-safe: bounded depth + cycle guard handle a
+    self-referential `cause` (`cause.cause === cause`) and deep chains in
+    O(depth) without hanging or overflowing the stack.
+  - Added regression tests covering ECONNREFUSED/ENOTFOUND surfaced via nested
+    `cause.cause.code`, a self-referential cycle, a chain deeper than the cap,
+    a chain with no code anywhere (graceful generic message), and the
+    timeout-over-nested-code precedence guard.
+
+  Retry semantics are unchanged: ECONNREFUSED was already classified `network`
+  and retryable via the constructor fallback; this change only populates `code`
+  and improves the diagnostic `message`.
+
 ## 2.0.2
 
 ### Patch Changes
