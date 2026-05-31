@@ -61,6 +61,32 @@ or feature family in isolation, so you can read any file independently.
 | `30-nestjs-provider.ts` | NestJS `useFactory` provider + injection token; test-swap pattern (NestJS types declared locally — no runtime dep) |
 | `31-testing-with-mock-fetch.ts` | Test your code that uses the client by injecting a `config.fetch` mock; assert attempts, headers, and error classification |
 
+### Framework integration (by runtime)
+
+`resilient-http` is framework- and runtime-agnostic: the same factory and the same
+options run on a server (route handlers, Server Components, DI providers) and in a
+real browser (Client Components). These examples are grouped by where they run.
+
+**Backend (server runtime)**
+
+| File | Recipe |
+|------|--------|
+| `28-bff-proxy.ts` | Backend-For-Frontend proxy (any fetch server) |
+| `30-nestjs-provider.ts` | NestJS `useFactory` provider (DI) |
+| `32-nextjs-route-handler.ts` | Next.js App Router route handler — GET with resilience metadata, POST opting into retries with a frozen idempotency key |
+| `33-nextjs-server-component.ts` | Next.js Server Component data load + Server Action, with a server-only redacted auth header |
+
+**Frontend (browser runtime)**
+
+| File | Recipe |
+|------|--------|
+| `34-nextjs-client-component.ts` | Next.js Client Component (`'use client'`) using the browser's native fetch; same-origin call + an abortable variant tied to the component lifecycle |
+
+> The behavior is identical in both runtimes; the only differences are environmental
+> (CORS and secret handling in the browser, connection reuse on the server). An
+> end-to-end suite that runs the library in both a Node server runtime and a real
+> browser lives in the `resilient-http-e2e-nextjs` project.
+
 ## Philosophy
 
 `resilient-http` is **business-agnostic**. It provides composable tools; you decide
