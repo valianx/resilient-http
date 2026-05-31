@@ -16,10 +16,10 @@ else**. Two properties are non-negotiable:
   queues — lives in *consumer* code, not in this library. Userland recipes for
   those patterns live in [`docs/use-cases/`](./docs/use-cases).
 
-Before proposing a feature, please check [`ROADMAP.md`](./ROADMAP.md) — it lists
-what is planned and what is **deliberately out of scope**. Issues/PRs that add
-out-of-scope surface will likely be declined, but a `docs/use-cases/` recipe that
-shows how to build the pattern in userland is always welcome.
+Before proposing a feature, weigh it against that scope. Orchestration concerns
+(circuit breakers, bulkheads, rate-limiters) and anything that would add a runtime
+dependency are out of scope and will likely be declined — but a `docs/use-cases/`
+recipe that shows how to build the pattern in userland is always welcome.
 
 ## Prerequisites
 
@@ -142,5 +142,5 @@ no inline changelog inside source files. Update the canonical doc in place.
 ## Questions
 
 Open an issue describing what you want to do before investing in a large change,
-especially anything that touches the public API or the items in `ROADMAP.md`.
+especially anything that touches the public API or the library's scope.
 Thanks for contributing!
