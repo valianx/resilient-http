@@ -22,6 +22,6 @@ See CONTRIBUTING.md before opening.
 - [ ] JSDoc updated for any public API change
 - [ ] `CHANGELOG.md` updated (SemVer-appropriate)
 - [ ] No new runtime dependencies
-- [ ] Stays in scope per `ROADMAP.md` (orchestration belongs in consumer code)
+- [ ] Stays in scope (orchestration belongs in consumer code, not the library)
 - [ ] If touching the error path: `toJSON()` still excludes body/cause/meta and
       leaks no secrets into `message`
