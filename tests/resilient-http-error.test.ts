@@ -897,3 +897,122 @@ describe('ResilientHttpError — AC-10 fail-safe URL redaction', () => {
     assert.strictEqual(json['url'], cleanUrl);
   });
 });
+
+// ============================================================================
+// fix(network-message) — walk the cause chain so a connection-level code
+// nested inside undici's TypeError{cause:{code}} is surfaced into code+message.
+//
+//   AC-N1: ECONNREFUSED at cause.cause.code → code + 'Network error: ECONNREFUSED'
+//          (and host/port from the raw cause never leak into the message)
+//   AC-N2: ENOTFOUND at cause.cause.code → code + message surfaced
+//   AC-N3: self-referential cause (cause.cause === cause) → terminates, no hang
+//   AC-N4: chain deeper than the depth cap with no code → graceful generic message
+//   AC-N5: no code anywhere in the chain → still 'Network error' (graceful)
+//   AC-N6: level-0 TimeoutError precedence over a nested code (timeout unchanged)
+// ============================================================================
+
+describe('ResilientHttpError — network cause-chain code resolution', () => {
+  it('AC-N1: surfaces ECONNREFUSED nested at cause.cause.code (undici shape)', () => {
+    // undici wraps a connect refusal as TypeError{message:'fetch failed'}
+    // whose .cause carries the real .code. The raw inner message contains the
+    // host:port — it must NOT leak into err.message (payment-context log path).
+    const inner = new Error('connect ECONNREFUSED 127.0.0.1:9') as Error & {
+      code?: string;
+    };
+    inner.code = 'ECONNREFUSED';
+    const fetchFailed = new TypeError('fetch failed') as TypeError & {
+      cause?: unknown;
+    };
+    fetchFailed.cause = inner;
+
+    const err = new ResilientHttpError({ kind: 'network', cause: fetchFailed });
+
+    assert.strictEqual(err.code, 'ECONNREFUSED');
+    assert.strictEqual(err.classification, 'network');
+    assert.strictEqual(err.isRetryable, true);
+    assert.strictEqual(err.message, 'Network error: ECONNREFUSED');
+    // security: the host/port from the raw cause must never reach the message
+    assert.ok(!err.message.includes('127.0.0.1'), 'host must not leak into message');
+    assert.ok(!err.message.includes(':9'), 'port must not leak into message');
+    // toJSON() still excludes cause; only the safe code is exposed
+    const json = err.toJSON();
+    assert.strictEqual(json['code'], 'ECONNREFUSED');
+    assert.ok(!('cause' in json), 'cause must not appear in toJSON()');
+  });
+
+  it('AC-N2: surfaces ENOTFOUND nested at cause.cause.code', () => {
+    const inner = new Error('getaddrinfo ENOTFOUND nope.invalid') as Error & {
+      code?: string;
+    };
+    inner.code = 'ENOTFOUND';
+    const fetchFailed = new TypeError('fetch failed') as TypeError & {
+      cause?: unknown;
+    };
+    fetchFailed.cause = inner;
+
+    const err = new ResilientHttpError({ kind: 'network', cause: fetchFailed });
+
+    assert.strictEqual(err.code, 'ENOTFOUND');
+    assert.strictEqual(err.classification, 'network');
+    assert.strictEqual(err.message, 'Network error: ENOTFOUND');
+    assert.ok(!err.message.includes('nope.invalid'), 'host must not leak into message');
+  });
+
+  it('AC-N3: terminates on a self-referential cause chain (cycle guard)', () => {
+    const cyclic = new TypeError('fetch failed') as TypeError & {
+      cause?: unknown;
+    };
+    cyclic.cause = cyclic; // points back at itself — must not hang or overflow
+
+    let err: ResilientHttpError | undefined;
+    assert.doesNotThrow(() => {
+      err = new ResilientHttpError({ kind: 'network', cause: cyclic });
+    });
+    // no code anywhere in the (cyclic) chain → graceful generic message
+    assert.strictEqual(err!.code, undefined);
+    assert.strictEqual(err!.message, 'Network error');
+  });
+
+  it('AC-N4: terminates on a chain deeper than the cap without a recognizable code', () => {
+    // Build a chain deeper than the bounded walk; none carry a code.
+    const head: { cause?: unknown } = {};
+    let node = head;
+    for (let i = 0; i < 20; i++) {
+      const next: { cause?: unknown } = {};
+      node.cause = next;
+      node = next;
+    }
+    const err = new ResilientHttpError({ kind: 'network', cause: head });
+    assert.strictEqual(err.code, undefined);
+    assert.strictEqual(err.message, 'Network error');
+  });
+
+  it('AC-N5: returns a generic message when no code exists anywhere in the chain', () => {
+    const inner = new Error('something failed'); // no .code, no special name
+    const fetchFailed = new TypeError('fetch failed') as TypeError & {
+      cause?: unknown;
+    };
+    fetchFailed.cause = inner;
+
+    const err = new ResilientHttpError({ kind: 'network', cause: fetchFailed });
+    assert.strictEqual(err.code, undefined);
+    assert.strictEqual(err.message, 'Network error');
+  });
+
+  it('AC-N6: prefers a level-0 name (TimeoutError) over a nested code (regression)', () => {
+    // A TimeoutError at the top must keep producing TIMEOUT_ERR even if a
+    // nested cause carries some other code — timeout/abort behavior unchanged.
+    const inner = new Error('connect ECONNREFUSED 127.0.0.1:9') as Error & {
+      code?: string;
+    };
+    inner.code = 'ECONNREFUSED';
+    const top = new Error('timed out') as Error & { cause?: unknown };
+    top.name = 'TimeoutError';
+    top.cause = inner;
+
+    const err = new ResilientHttpError({ kind: 'network', cause: top });
+    assert.strictEqual(err.code, 'TIMEOUT_ERR');
+    assert.strictEqual(err.classification, 'timeout');
+    assert.strictEqual(err.message, 'Network error: TIMEOUT_ERR');
+  });
+});
