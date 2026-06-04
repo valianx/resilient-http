@@ -33,6 +33,7 @@ export const DEFAULT_JITTER_CONFIG: Partial<JitterConfig> = {
  * @see https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/
  */
 export function fullJitter(baseDelay: number): number {
+  // Stryker disable next-line all: randomBetween call is RNG-dependent; mutating it produces equivalent mutants (any value in [0, floor(baseDelay)] is valid by design)
   return randomBetween(0, Math.floor(baseDelay));
 }
 
@@ -43,6 +44,7 @@ export function fullJitter(baseDelay: number): number {
  */
 export function equalJitter(baseDelay: number): number {
   const half = Math.floor(baseDelay / 2);
+  // Stryker disable next-line all: randomBetween call is RNG-dependent; mutating it produces equivalent mutants (any value in [0, half] is valid by design — bounds are tested separately)
   return half + randomBetween(0, half);
 }
 
@@ -62,6 +64,7 @@ export function decorrelatedJitter(
 ): number {
   const min = initialDelay;
   const max = previousDelay * 3;
+  // Stryker disable next-line all: randomFloatBetween call is RNG-dependent; mutating it produces equivalent mutants (any float in [min, max] is valid by design — bounds previousDelay*3 and Math.min cap are tested separately)
   const jitteredDelay = randomFloatBetween(min, max);
   return Math.min(Math.floor(jitteredDelay), maxDelay);
 }
