@@ -1,0 +1,35 @@
+{
+  "$schema": "./node_modules/@stryker-mutator/core/schema/stryker-schema.json",
+  "testRunner": "command",
+  "commandRunner": {
+    "command": "node --import tsx --test tests/backoff.test.ts tests/jitter.test.ts tests/error-extraction.test.ts tests/retry-engine.test.ts tests/signals.test.ts tests/hooks.test.ts tests/client.test.ts tests/timeout-signal.test.ts tests/resilient-http-error.test.ts tests/integration-e2e.test.ts tests/mutation-gaps.test.ts"
+  },
+  "mutate": [
+    "src/core/classify.ts",
+    "src/core/backoff.ts",
+    "src/core/jitter.ts",
+    "src/retry/engine.ts"
+  ],
+  "ignorePatterns": [
+    "dist",
+    "docs",
+    "workspaces",
+    "reports",
+    ".stryker-tmp"
+  ],
+  "thresholds": {
+    "high": 85,
+    "low": 70,
+    "break": null
+  },
+  "reporters": ["clear-text", "progress", "html"],
+  "htmlReporter": {
+    "fileName": "reports/mutation/mutation.html"
+  },
+  "coverageAnalysis": "off",
+  "concurrency": 2,
+  "tempDirName": ".stryker-tmp",
+  "cleanTempDir": "always",
+  "logLevel": "info",
+  "fileLogLevel": "off"
+}

@@ -92,6 +92,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Mutation testing via Stryker 9.6.1 scoped to the four core decision modules (`backoff.ts`, `jitter.ts`, error classification, retry engine). Baseline scores: backoff 95 %, classify 93.5 %, jitter 63.6 %, engine 58.58 %; overall core 89.70 % / project-wide 69.41 %. Running in report-only mode (`break: null`) until `engine.ts` and `jitter.ts` reach the 60 % threshold target. Nightly CI job added (`mutation.yml`, `workflow_dispatch`-enabled, `permissions: contents: read`). 53 new gap-filling tests added in `tests/mutation-gaps.test.ts`.
+
 ## [2.0.0] — 2026-05-29
 
 ### Breaking Changes

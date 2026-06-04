@@ -42,3 +42,7 @@ bun.lockb
 # Claude Code session docs
 /session-docs/
 /workspaces/
+
+# Stryker mutation testing
+.stryker-tmp/
+reports/mutation/
