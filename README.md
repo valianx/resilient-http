@@ -1,7 +1,7 @@
 # Resilient HTTP
 
 A zero-dependency library for resilient HTTP operations.  
-Works with **Node.js 24+**, **Bun 1.0+**, and browsers (ESM).
+Works with **Node.js 22+**, **Bun 1.0+**, and browsers. Ships dual **ESM + CommonJS** (`import` or `require`).
 
 ## Features
 
@@ -24,7 +24,7 @@ pnpm add resilient-http
 npm install resilient-http
 ```
 
-**Requirement:** Node.js >= 24.0.0 (or Bun >= 1.0.0).
+**Requirement:** Node.js >= 22.0.0 (or Bun >= 1.0.0).
 
 ## Quick Start
 

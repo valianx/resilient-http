@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.1.1
+
+### Patch Changes
+
+- docs: correct stated Node.js requirement to >=22 (was 24) on README and CONTRIBUTING
+
+  The README — which ships to npm — still claimed "Works with Node.js 24+" and
+  "Requirement: Node.js >= 24.0.0" after the engine floor was widened to `>=22`
+  in 2.1.0. Updated both lines and the CONTRIBUTING prerequisite to Node >= 22,
+  and clarified that the package ships dual ESM + CommonJS (`import` or
+  `require`). Documentation only — no code or API changes.
+
 ## 2.1.0
 
 ### Minor Changes

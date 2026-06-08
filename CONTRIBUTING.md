@@ -23,7 +23,7 @@ recipe that shows how to build the pattern in userland is always welcome.
 
 ## Prerequisites
 
-- **Node.js >= 24**
+- **Node.js >= 22**
 - **pnpm** (the repo pins `pnpm@11.x` via `packageManager`; run `corepack enable`
   to get the right version automatically)
 - **Bun** (optional) — CI runs both Bun and the Node test runner. You can
