@@ -1,2 +1,7 @@
 allowBuilds:
   esbuild: true
+
+# Force-patch a transitive, dev-only DoS in qs (GHSA via typed-rest-client ->
+# @stryker-mutator/core). Not in the shipped dist; consumers are unaffected.
+overrides:
+  qs@>=6.11.1 <=6.15.1: '>=6.15.2'
