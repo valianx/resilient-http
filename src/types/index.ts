@@ -622,14 +622,18 @@ export interface StandardizedError {
 
   /**
    * Response body — present for kind:'response', capped at maxBodySize.
-   * Not included in toJSON() by default.
+   * Included in toJSON() (v2.2+). Consumer is responsible for redaction before
+   * forwarding to untrusted clients.
    */
   body?: unknown;
 
   /** Network error code (e.g. 'ECONNREFUSED', 'ABORT_ERR'). */
   code?: string;
 
-  /** Underlying cause error. Not included in toJSON() by default. */
+  /**
+   * Underlying cause error. Serialized and included in toJSON() (v2.2+).
+   * Consumer is responsible for redaction before forwarding to untrusted clients.
+   */
   cause?: unknown;
 
   /** Opaque ID for the overall request (e.g. from a correlation header). */
@@ -639,12 +643,18 @@ export interface StandardizedError {
   attemptId?: string;
 
   /**
-   * Arbitrary metadata for runtime use only.
-   * Never included in toJSON() — must not appear in logs or wire responses.
+   * Arbitrary metadata for runtime use only. Included in toJSON() (v2.2+).
+   * Consumer is responsible for redaction before forwarding to untrusted clients.
    */
   meta?: Record<string, unknown>;
 
-  /** Return a log/wire-safe JSON representation (no body, cause, or meta). */
+  /**
+   * Return a structured JSON representation of the error for logging/diagnosis.
+   * Includes body, serialized cause, and meta (v2.2+). Sensitive headers are
+   * replaced with [REDACTED] via the built-in denylist + redactHeaders config.
+   * The message is capped at 512 characters. The url field respects redactQueryParams.
+   * This is NOT a redaction boundary — sanitize before forwarding to untrusted clients.
+   */
   toJSON(): Record<string, unknown>;
 }
 
