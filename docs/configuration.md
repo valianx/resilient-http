@@ -40,7 +40,7 @@ const client = createResilientHttp({
 | `baseURL` | `string` | — | Prepended to every relative request URL. See [03-base-url-and-params.ts](./use-cases/03-base-url-and-params.ts). |
 | `headers` | `Record<string, string>` | `{}` | Default headers merged into every request. Per-request headers override on a key-by-key basis. See [16-headers-and-logger.ts](./use-cases/16-headers-and-logger.ts). |
 | `timeout` | `number` (ms) | — | Per-attempt timeout. No new attempt starts after expiry. See [09-timeout-and-deadline.ts](./use-cases/09-timeout-and-deadline.ts). |
-| `deadline` | `number` (ms epoch) | — | Absolute deadline as `Date.now()`-compatible timestamp. No new attempt starts once `Date.now() >= deadline`. See [09-timeout-and-deadline.ts](./use-cases/09-timeout-and-deadline.ts). |
+| `deadline` | `number` (ms epoch) | — | **Absolute** deadline as a `Date.now()`-compatible timestamp — **not** a relative duration. No new attempt starts once `Date.now() >= deadline`. A value below `1e12` is rejected as a relative-value mistake with a `ResilientHttpError{kind:'setup'}` (use `Date.now() + ms`). See [09-timeout-and-deadline.ts](./use-cases/09-timeout-and-deadline.ts). |
 | `retry` | `RetryOptions` | `{}` | Retry configuration — see [Retry options](#retry-options--retryoptions). |
 | `hooks` | `HookSet` | `{}` | Lifecycle hooks — see [Hook system](#hook-system--hookset). |
 | `responseType` | `ResponseType` | `'auto'` | Body parsing mode — see [Response types](#response-types--responsetype). |

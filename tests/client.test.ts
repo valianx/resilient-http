@@ -21,6 +21,7 @@ import assert from 'node:assert/strict';
 
 import { createResilientHttp } from '../src/client/create';
 import { isResilientHttpError } from '../src/errors/resilient-http-error';
+import { EPOCH_FLOOR } from '../src/core/validate';
 import type { RequestConfig } from '../src/types';
 
 // ============================================================================
@@ -732,6 +733,194 @@ describe('Retry integration', () => {
     await client.get('https://api.test/service');
 
     assert.ok(retryAttempts.length > 0, 'onRetry must have been called');
+  });
+});
+
+// ============================================================================
+// Issue #37 — AC-1: guardrail rejects deadline:8000 at instance construction
+// ============================================================================
+
+describe('AC-1 (#37): createResilientHttp throws on relative deadline:8000', () => {
+  it('throws synchronously ResilientHttpError{kind:setup} containing "8000" and guidance', () => {
+    let caughtError: unknown;
+    try {
+      createResilientHttp({ deadline: 8000 });
+    } catch (e) {
+      caughtError = e;
+    }
+
+    assert.ok(isResilientHttpError(caughtError), 'must be a ResilientHttpError');
+    assert.strictEqual((caughtError as { kind: string }).kind, 'setup');
+    assert.ok(
+      (caughtError as { message: string }).message.includes('8000'),
+      `message must contain "8000", got: ${(caughtError as { message: string }).message}`
+    );
+    assert.ok(
+      (caughtError as { message: string }).message.includes('did you mean Date.now() + 8000?'),
+      `message must contain guidance, got: ${(caughtError as { message: string }).message}`
+    );
+  });
+
+  it('throws before any fetch call is made', () => {
+    const fetchCalls: unknown[] = [];
+    const mockFetch = async (): Promise<Response> => {
+      fetchCalls.push(true);
+      return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
+    };
+
+    let threw = false;
+    try {
+      createResilientHttp({ fetch: mockFetch as typeof globalThis.fetch, deadline: 8000 });
+    } catch {
+      threw = true;
+    }
+
+    assert.ok(threw, 'must throw synchronously');
+    assert.strictEqual(fetchCalls.length, 0, 'fetch must never be called');
+  });
+});
+
+// ============================================================================
+// Issue #37 — AC-2: guardrail rejects deadline:0 and deadline:-5
+// ============================================================================
+
+describe('AC-2 (#37): createResilientHttp throws on deadline:0 and deadline:-5', () => {
+  it('throws for deadline:0', () => {
+    let caughtError: unknown;
+    try {
+      createResilientHttp({ deadline: 0 });
+    } catch (e) {
+      caughtError = e;
+    }
+
+    assert.ok(isResilientHttpError(caughtError), 'must be a ResilientHttpError');
+    assert.strictEqual((caughtError as { kind: string }).kind, 'setup');
+  });
+
+  it('throws for deadline:-5', () => {
+    let caughtError: unknown;
+    try {
+      createResilientHttp({ deadline: -5 });
+    } catch (e) {
+      caughtError = e;
+    }
+
+    assert.ok(isResilientHttpError(caughtError), 'must be a ResilientHttpError');
+    assert.strictEqual((caughtError as { kind: string }).kind, 'setup');
+    assert.ok(
+      (caughtError as { message: string }).message.includes('-5'),
+      'message must contain the offending value "-5"'
+    );
+  });
+});
+
+// ============================================================================
+// Issue #37 — AC-3: per-request guardrail rejects .get(url, {deadline:8000})
+// ============================================================================
+
+describe('AC-3 (#37): per-request deadline:8000 causes promise rejection, fetch never called', () => {
+  it('rejects with ResilientHttpError{kind:setup} and never calls fetch', async () => {
+    const fetchCalls: unknown[] = [];
+    const mockFetch = async (): Promise<Response> => {
+      fetchCalls.push(true);
+      return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
+    };
+
+    const client = createResilientHttp({ fetch: mockFetch as typeof globalThis.fetch });
+    const error = await client.get('https://api.test/items', { deadline: 8000 }).catch((e: unknown) => e);
+
+    assert.ok(isResilientHttpError(error), 'must be a ResilientHttpError');
+    assert.strictEqual((error as { kind: string }).kind, 'setup');
+    assert.ok(
+      (error as { message: string }).message.includes('8000'),
+      `message must contain "8000", got: ${(error as { message: string }).message}`
+    );
+    assert.ok(
+      (error as { message: string }).message.includes('did you mean Date.now() + 8000?'),
+      'message must include guidance'
+    );
+    assert.strictEqual(fetchCalls.length, 0, 'fetch must never be called');
+  });
+});
+
+// ============================================================================
+// Issue #37 — AC-4: retry sub-object deadline:8000 throws at construction
+// ============================================================================
+
+describe('AC-4 (#37): createResilientHttp({retry:{deadline:8000}}) throws synchronously', () => {
+  it('throws ResilientHttpError{kind:setup} for relative deadline in retry sub-object', () => {
+    let caughtError: unknown;
+    try {
+      createResilientHttp({ retry: { deadline: 8000 } });
+    } catch (e) {
+      caughtError = e;
+    }
+
+    assert.ok(isResilientHttpError(caughtError), 'must be a ResilientHttpError');
+    assert.strictEqual((caughtError as { kind: string }).kind, 'setup');
+    assert.ok(
+      (caughtError as { message: string }).message.includes('8000'),
+      `message must contain "8000", got: ${(caughtError as { message: string }).message}`
+    );
+  });
+});
+
+// ============================================================================
+// Issue #37 — AC-8: EPOCH_FLOOR boundary: 1e12 accepted, 1e12-1 rejected
+// ============================================================================
+
+describe('AC-8 (#37): EPOCH_FLOOR boundary — 1e12 accepted, 1e12-1 rejected', () => {
+  it('deadline === EPOCH_FLOOR (1e12) is accepted (not rejected by guardrail)', () => {
+    // Must not throw — this is the boundary value at the floor of acceptable epochs.
+    assert.doesNotThrow(() => {
+      createResilientHttp({ deadline: EPOCH_FLOOR });
+    });
+  });
+
+  it('deadline === EPOCH_FLOOR - 1 is rejected', () => {
+    let caughtError: unknown;
+    try {
+      createResilientHttp({ deadline: EPOCH_FLOOR - 1 });
+    } catch (e) {
+      caughtError = e;
+    }
+
+    assert.ok(isResilientHttpError(caughtError), 'must be a ResilientHttpError');
+    assert.strictEqual((caughtError as { kind: string }).kind, 'setup');
+  });
+});
+
+// ============================================================================
+// Issue #37 — AC-9: no totalTimeout field exists on public types
+// ============================================================================
+
+describe('AC-9 (#37): no totalTimeout field on RetryOptions / ResilientHttpOptions / RequestConfig', () => {
+  it('totalTimeout does not exist on any public type (source grep guard)', async () => {
+    const fs = await import('node:fs');
+    const path = await import('node:path');
+
+    const typesPath = path.resolve(
+      new URL('.', import.meta.url).pathname.replace(/^\/([A-Z]:)/, '$1'),
+      '../src/types/index.ts'
+    );
+
+    const source = fs.readFileSync(typesPath, 'utf-8');
+    const hasTotalTimeout = /totalTimeout/.test(source);
+
+    assert.strictEqual(
+      hasTotalTimeout,
+      false,
+      'totalTimeout must NOT appear in src/types/index.ts — it was a cancelled direction'
+    );
+  });
+
+  it('RetryOptions deadline is typed as deadline (not totalTimeout)', () => {
+    // Type-level check: a RetryOptions object with deadline compiles fine.
+    const opts: import('../src/types').RetryOptions = { deadline: Date.now() + 8000 };
+    assert.ok(opts.deadline !== undefined);
+    // @ts-expect-error — totalTimeout does not exist on RetryOptions
+    const _unused = (opts as unknown as Record<string, unknown>)['totalTimeout'];
+    void _unused;
   });
 });
 

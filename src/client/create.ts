@@ -35,6 +35,7 @@ import { RequestBuilder } from './request-builder';
 import { parseResponse, readErrorBody, headersToRecord } from './response';
 import { executeWithRetry, executeWithRetryAndSignal } from '../retry/engine';
 import { runResponseHooks, runRetryObservers, runFailureObservers } from '../hooks/run';
+import { assertAbsoluteDeadline } from '../core/validate';
 
 // ============================================================================
 // Defaults
@@ -257,6 +258,10 @@ function resolveRequestConfig(
     cfg.deadline ?? instanceOptions.deadline ?? retry.deadline;
 
   if (effectiveTimeout !== undefined) retry.timeout = effectiveTimeout;
+  // Guard: reject implausibly-small epoch values before they reach the engine.
+  // A per-request deadline:8000 rejects here so the returned promise rejects
+  // with ResilientHttpError{kind:'setup'} rather than silently failing.
+  assertAbsoluteDeadline(effectiveDeadline);
   if (effectiveDeadline !== undefined) retry.deadline = effectiveDeadline;
 
   // Hooks: concatenated, instance first.
@@ -495,12 +500,25 @@ function wrapNetworkError(
  * ```
  */
 export function createResilientHttp(config: ResilientHttpOptions = {}): ResilientHttpClient {
+  // Fail-fast: reject relative deadline values synchronously at construction
+  // so callers get a descriptive error immediately rather than on first request.
+  assertAbsoluteDeadline(config.deadline);
+  assertAbsoluteDeadline(config.retry?.deadline);
+
   function makeRequest<T>(
     method: string,
     url: string,
     reqConfig?: RequestConfig
   ): Promise<ResilientResponse<T>> {
-    const resolved = resolveRequestConfig(config, url, method, reqConfig);
+    // resolveRequestConfig may throw synchronously (e.g. the deadline guardrail).
+    // Wrap in a try-catch so callers always receive a rejected Promise, never a
+    // synchronous throw from what is supposed to be an async API surface.
+    let resolved: ResolvedRequestConfig;
+    try {
+      resolved = resolveRequestConfig(config, url, method, reqConfig);
+    } catch (err) {
+      return Promise.reject(err);
+    }
     return executeRequest<T>(resolved);
   }
 

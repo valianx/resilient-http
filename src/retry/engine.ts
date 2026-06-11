@@ -417,7 +417,12 @@ export async function executeWithRetry<T>(
     }
   }
 
-  throw lastError;
+  // fix(deadline): when the pre-attempt hard cap breaks the loop before fn was
+  // ever called (a legitimately-past absolute deadline), lastError is undefined.
+  // Throw a TimeoutError DOMException so wrapNetworkError maps it to
+  // classification:'timeout' with a contentful message rather than throwing
+  // undefined and producing a contentless Network error.
+  throw lastError ?? new DOMException('deadline exceeded before any request attempt', 'TimeoutError');
 }
 
 /**
@@ -531,5 +536,8 @@ export async function executeWithRetryAndSignal<T>(
     }
   }
 
-  throw lastError;
+  // fix(deadline): same guard as executeWithRetry — when the deadline hard cap
+  // breaks the loop before any attempt, lastError is undefined; throw a
+  // TimeoutError DOMException for a contentful classification:'timeout' error.
+  throw lastError ?? new DOMException('deadline exceeded before any request attempt', 'TimeoutError');
 }

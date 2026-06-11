@@ -347,3 +347,180 @@ describe('BUG-6: per-request timeout: timeout used is min(instance, per-request)
     resetTimers();
   });
 });
+
+// ============================================================================
+// Issue #37 — AC-5/AC-6 (integration layer): past absolute deadline through
+// createResilientHttp surfaces classification:'timeout' with a contentful
+// message (not undefined, not a contentless Network error).
+// ============================================================================
+
+describe('#37 Bug A (integration): past absolute deadline → ResilientHttpError{classification:timeout}', () => {
+  it('executeWithRetry path: fetch never called, error has classification:timeout and contentful message', async () => {
+    const fetchCalls: unknown[] = [];
+    const mockFetch = async (): Promise<Response> => {
+      fetchCalls.push(true);
+      return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
+    };
+
+    // No caller signal → routes through executeWithRetry.
+    const client = createResilientHttp({ fetch: mockFetch as typeof globalThis.fetch });
+    const error = await client
+      .get('https://api.test/items', { deadline: Date.now() - 1 })
+      .catch((e: unknown) => e);
+
+    assert.strictEqual(fetchCalls.length, 0, 'fetch must never be called when deadline is past');
+    assert.ok(isResilientHttpError(error), 'must be a ResilientHttpError');
+
+    const e = error as { kind: string; classification: string; message: string; cause?: unknown };
+    assert.strictEqual(e.kind, 'network',
+      `expected kind:'network', got kind:'${e.kind}'`);
+    assert.strictEqual(e.classification, 'timeout',
+      `expected classification:'timeout', got:'${e.classification}'`);
+    assert.ok(
+      typeof e.message === 'string' && e.message.length > 0,
+      `message must be a non-empty string, got: ${JSON.stringify(e.message)}`
+    );
+    assert.ok(
+      !e.message.startsWith('Network error\n') || e.message.includes('TIMEOUT_ERR'),
+      'message must be contentful — not the bare contentless "Network error"'
+    );
+    // Pin that the DOMException's message travels to error.cause.message so a mutant
+    // that omits the DOMException constructor string would fail here.
+    const cause = e.cause as { message?: string } | undefined;
+    assert.ok(
+      cause !== undefined && typeof cause.message === 'string' && cause.message.length > 0,
+      `error.cause.message must be a non-empty string, got: ${JSON.stringify(cause?.message)}`
+    );
+    assert.strictEqual(
+      cause?.message,
+      'deadline exceeded before any request attempt',
+      'cause.message must be the exact DOMException string from the ?? fallback'
+    );
+  });
+
+  it('executeWithRetryAndSignal path: fetch never called, error has classification:timeout', async () => {
+    const fetchCalls: unknown[] = [];
+    const mockFetch = async (): Promise<Response> => {
+      fetchCalls.push(true);
+      return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
+    };
+
+    // Caller signal present → routes through executeWithRetryAndSignal.
+    const controller = new AbortController();
+    const client = createResilientHttp({ fetch: mockFetch as typeof globalThis.fetch });
+    const error = await client
+      .get('https://api.test/items', { deadline: Date.now() - 1, signal: controller.signal })
+      .catch((e: unknown) => e);
+
+    assert.strictEqual(fetchCalls.length, 0, 'fetch must never be called when deadline is past');
+    assert.ok(isResilientHttpError(error), 'must be a ResilientHttpError');
+
+    const e = error as { kind: string; classification: string; message: string; cause?: unknown };
+    assert.strictEqual(e.kind, 'network',
+      `expected kind:'network', got kind:'${e.kind}'`);
+    assert.strictEqual(e.classification, 'timeout',
+      `expected classification:'timeout', got:'${e.classification}'`);
+    assert.ok(
+      typeof e.message === 'string' && e.message.length > 0,
+      `message must be a non-empty string, got: ${JSON.stringify(e.message)}`
+    );
+    // Pin the DOMException's exact message on the signal path as well.
+    const cause = e.cause as { message?: string } | undefined;
+    assert.ok(
+      cause !== undefined && typeof cause.message === 'string' && cause.message.length > 0,
+      `error.cause.message must be a non-empty string (signal path), got: ${JSON.stringify(cause?.message)}`
+    );
+    assert.strictEqual(
+      cause?.message,
+      'deadline exceeded before any request attempt',
+      'cause.message must be the exact DOMException string from the ?? fallback (signal path)'
+    );
+  });
+});
+
+// ============================================================================
+// Issue #37 — Bug A counter-case (integration): lastError IS set → REAL error
+// propagates, NOT the ?? fallback DOMException.
+//
+// Mutation-kill target: a mutant that replaces `throw lastError ?? new DOMException(...)`
+// with `throw new DOMException(...)` would produce kind:'network', classification:'timeout'
+// instead of kind:'response', statusCode:503. This test is the decisive kill.
+// ============================================================================
+
+describe('#37 Bug A counter-case (integration): real attempt ran → real error propagates, not ?? fallback', () => {
+  it('executeWithRetry path: 503 attempt succeeds before deadline expires — real ResilientHttpError{kind:response,503}', async () => {
+    // Compute deadline before any timer manipulation — real Date.now() + 5ms.
+    // The first attempt fires synchronously, fails with 503, then backoff sleep
+    // (100ms) would overshoot the deadline (+5ms) → delayExceedsDeadline fires →
+    // break with lastError already set → `throw lastError ?? DOMException` must
+    // throw the 503 error. No includeDate needed: Date mock would break the guardrail.
+    const nearFutureDeadline = Date.now() + 5;
+
+    const fetchCalls503: string[] = [];
+    const client503 = createResilientHttp({
+      fetch: (async (input: RequestInfo | URL): Promise<Response> => {
+        fetchCalls503.push(typeof input === 'string' ? input : input.toString());
+        return new Response('{"error":"service unavailable"}', {
+          status: 503,
+          headers: { 'content-type': 'application/json' },
+        });
+      }) as typeof globalThis.fetch,
+      retry: {
+        maxAttempts: 5,
+        initialDelay: 100,
+        jitter: 'none',
+        backoff: 'constant',
+        deadline: nearFutureDeadline,
+      },
+    });
+
+    const error = await client503.get('https://api.test/items').catch((e: unknown) => e);
+
+    assert.ok(isResilientHttpError(error), 'must be a ResilientHttpError');
+    const e = error as { kind: string; statusCode?: number; classification: string };
+    // Must be a response error (503), NOT a timeout from the ?? fallback.
+    assert.strictEqual(e.kind, 'response',
+      `expected kind:'response' (real 503 error), got kind:'${e.kind}' — ?? fallback must NOT be thrown when lastError is set`);
+    assert.strictEqual(e.statusCode, 503,
+      `expected statusCode:503, got:${e.statusCode}`);
+    assert.notStrictEqual(e.classification, 'timeout',
+      'classification must NOT be timeout when the real attempt produced a 503 response error');
+  });
+
+  it('executeWithRetryAndSignal path: 503 attempt before deadline expires — real ResilientHttpError{kind:response,503}', async () => {
+    // Same as above but with a caller signal → routes through executeWithRetryAndSignal.
+    const nearFutureDeadline = Date.now() + 5;
+    const controller = new AbortController();
+    const calls503: string[] = [];
+
+    const client503 = createResilientHttp({
+      fetch: (async (input: RequestInfo | URL): Promise<Response> => {
+        calls503.push(typeof input === 'string' ? input : input.toString());
+        return new Response('{"error":"service unavailable"}', {
+          status: 503,
+          headers: { 'content-type': 'application/json' },
+        });
+      }) as typeof globalThis.fetch,
+      retry: {
+        maxAttempts: 5,
+        initialDelay: 100,
+        jitter: 'none',
+        backoff: 'constant',
+        deadline: nearFutureDeadline,
+      },
+    });
+
+    const error = await client503
+      .get('https://api.test/items', { signal: controller.signal })
+      .catch((e: unknown) => e);
+
+    assert.ok(isResilientHttpError(error), 'must be a ResilientHttpError');
+    const e = error as { kind: string; statusCode?: number; classification: string };
+    assert.strictEqual(e.kind, 'response',
+      `expected kind:'response' (real 503), got:'${e.kind}' (signal path) — ?? fallback must not fire when lastError is set`);
+    assert.strictEqual(e.statusCode, 503,
+      `expected statusCode:503, got:${e.statusCode} (signal path)`);
+    assert.notStrictEqual(e.classification, 'timeout',
+      'classification must NOT be timeout when the real attempt produced a 503 (signal path)');
+  });
+});
