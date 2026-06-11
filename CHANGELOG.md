@@ -1,5 +1,46 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+
+- **F1/OD-4** `docs/ARCHITECTURE.md` rewritten for v2.x reality: request-only scope, real
+  module tree (`src/client`, `src/hooks`, `src/retry/engine.ts`,
+  `src/core/{classify,validate,signals,message}`), three error kinds, Node 22+ floor, zero
+  deps. Removes all v1 references (circuit breaker, RxJS, `extractError`, `createResilientClient`).
+
+- **F2** `CLAUDE.md` corrected: package manager Yarn → pnpm, Golden Commands updated to
+  `pnpm …`, Repo Map updated to v2 tree, public-API table updated to v2 surface
+  (`createResilientHttp`, `ResilientHttpError`, `isResilientHttpError`, live v2 types).
+
+- **F4** `src/retry/engine.ts` de-duplicated: ~110-line near-identical loop collapsed into
+  one internal `runRetryLoop<T>`. Both `executeWithRetry` and `executeWithRetryAndSignal`
+  kept as exported thin wrappers (no import-side change). Signal-only branches guarded on
+  `callerSignal !== undefined`. No observable behavior change.
+
+- **F6** `src/types/index.ts` `StandardizedError` doc-comments corrected: `body`, `cause`,
+  and `meta` are included in `toJSON()` (v2.2+); contradicting phrases removed.
+
+- **F7** `tsconfig.json` target/lib aligned with tsup output: `target: "ES2022"`,
+  `lib: ["ES2023"]` (was `ES2020`/`ES2020`).
+
+- **F8** `src/client/create.ts` `warnIfRetryWithoutBound` message translated from Spanish
+  to English.
+
+- **F9** Internal barrel trim: `src/utils/index.ts` no longer re-exports `randomUpTo`
+  (unused by any intra-src module); `src/core/index.ts` no longer re-exports
+  `calculateDelayWithJitter` or `DEFAULT_JITTER_CONFIG` (unused by any intra-src module).
+  Public `src/index.ts` and the `exports` map are unchanged.
+
+- **OD-1** `README.md` and `docs/configuration.md` strengthened with explicit opt-in
+  guidance for `redactQueryParams`: consumers logging `toJSON()` output where request URLs
+  carry secrets in query strings must enable it. No behavior change.
+
+### Removed
+
+- **F5** `tests/index.ts` deleted: imported only 5 of 12 test files; referenced by nothing
+  (`package.json`, `stryker.conf.json`, `ci.yml` all use the `tests/*.test.ts` glob).
+
 ## 2.2.0
 
 ### Minor Changes
