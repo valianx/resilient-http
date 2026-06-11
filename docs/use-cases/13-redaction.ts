@@ -12,7 +12,9 @@
  *   - redactQueryParams: string[] — query-param names to redact in the url field
  *     of toJSON(). Fail-safe: if the URL cannot be parsed, the entire query
  *     string is hidden.
- *   - toJSON() ALWAYS excludes body, cause, and meta — no configuration needed.
+ *   - toJSON() exposes body, cause, and meta (v2.2+); it redacts sensitive headers
+ *     and caps the message, but is NOT a redaction boundary — sanitize before
+ *     returning errors to a client.
  *   - Redaction is presentation-only: the underlying err.headers and err.url
  *     instance fields are never mutated.
  *

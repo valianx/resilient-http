@@ -5,16 +5,24 @@
  * - Brand uses Symbol.for() (global registry) so the brand survives across
  *   module boundaries and duplicate installs. `instanceof` is intentionally
  *   NOT the detection mechanism because it breaks in those scenarios.
- * - toJSON() is safe-by-default: body, cause, and meta are NEVER emitted
- *   to prevent secrets / PII from reaching logs or BFF wire responses.
- * - Header redaction and query-param redaction are presentation-only;
- *   the underlying instance fields are never mutated.
+ * - toJSON() is transparency-first: body, cause (serialized, cycle-safe),
+ *   and meta ARE emitted so the consumer has full context. The consumer who
+ *   integrates this library owns security/redaction decisions for their sink.
+ * - Header redaction and query-param redaction are the two security controls
+ *   that this class enforces on behalf of all consumers (headers are a
+ *   well-known credential surface; the denylist is maintained here).
+ * - The message is capped at DEFAULT_MAX_MESSAGE_SIZE so a large response body
+ *   (e.g. payment response with PAN/token) cannot leak via the message field
+ *   into logs or BFF wire responses regardless of maxBodySize configuration
+ *   (fix(security): SEC-001).
  * - URL parsing is fail-safe: any parse failure causes full query redaction
  *   rather than emitting a raw string that may contain secrets.
+ * - serializeCause is fail-safe: exotic cause shapes (getter-throws, null-proto,
+ *   BigInt, circular) yield a partial/placeholder, never an exception.
  *
  * Security: this module is on the path to payment-context logs — do not
- * add any code that emits raw headers, raw query strings, or raw bodies
- * without explicit redaction.
+ * add any code that emits raw headers or raw query strings without explicit
+ * redaction.
  */
 
 import type { ErrorKind, ErrorClassification, StandardizedError } from '../types';
@@ -180,15 +188,17 @@ function capBody(body: unknown, maxSize: number): unknown {
 }
 
 /**
- * Maximum number of cause-chain levels inspected when resolving a network code.
+ * Maximum number of cause-chain levels inspected when resolving a network code
+ * and when serializing a cause for toJSON().
  *
  * undici nests the real connection-level code two levels deep — the top-level
  * cause is a TypeError{message:'fetch failed'} whose `.cause` carries `.code`.
  * 5 gives generous headroom for deeper wrappers while keeping the walk bounded.
  *
- * Combined with the cycle guard in resolveNetworkCode, the cap makes the walk
- * DoS-safe: a self-referential or mutually-referential cause chain terminates
- * in O(depth) without hanging or overflowing the stack.
+ * Combined with the shared visited-set cycle guard in resolveNetworkCode and
+ * serializeCause, the cap makes both walks DoS-safe: a self-referential or
+ * mutually-referential cause chain terminates in O(depth) without hanging or
+ * overflowing the stack.
  */
 const MAX_CAUSE_DEPTH = 5;
 
@@ -198,6 +208,11 @@ const MAX_CAUSE_DEPTH = 5;
  * Name-derived signals (AbortError/TimeoutError) take precedence over a string
  * `.code` on the same node, preserving the original level-0 resolution order so
  * timeout/abort behavior is unchanged.
+ *
+ * Falls back to `errno` (as a string) when no string `.code` exists and no
+ * special name matched — Node system errors normally short-circuit on `.code`
+ * first, so the `errno` path is reached only in the rare case where a code-less
+ * node carries only a numeric errno (e.g. certain AggregateError members).
  */
 function codeFromCauseNode(node: Record<string, unknown>): string | undefined {
   // AbortError from the Fetch API or Node's AbortController
@@ -209,6 +224,12 @@ function codeFromCauseNode(node: Record<string, unknown>): string | undefined {
   if (node['name'] === 'TimeoutError') return 'TIMEOUT_ERR';
 
   if (typeof node['code'] === 'string') return node['code'];
+
+  // fix(errno): surface errno when no string .code exists. Node system errors
+  // almost always carry both .code and .errno, but AggregateError members (undici
+  // multi-address connect) occasionally omit .code while still carrying .errno.
+  if (typeof node['errno'] === 'number') return String(node['errno']);
+
   return undefined;
 }
 
@@ -217,36 +238,140 @@ function codeFromCauseNode(node: Record<string, unknown>): string | undefined {
  *
  * Handles AbortError/TimeoutError (name-based) and Node/undici error objects
  * (code-based). undici buries a connection-level code (e.g. ECONNREFUSED) at
- * `cause.cause.code`, so single-level inspection misses it. The walk descends
- * up to MAX_CAUSE_DEPTH levels and returns the first recognizable signal it
- * finds at any level.
+ * `cause.cause.code` or inside `AggregateError.errors[].code`, so a linear
+ * single-edge walk misses it. This unified walk descends BOTH `.cause` AND
+ * `AggregateError.errors[]` with a single shared `visited` Set and a total-node
+ * budget so that cycles and wide fan-outs terminate without hanging.
  *
  * fix(network-message): surface a diagnostic code/message for connection-level
  * failures instead of falling through to the generic 'Network error'. Only the
  * well-known code is exposed — never host, port, URL, headers, or body.
  *
- * DoS-safe: bounded depth + a visited-set cycle guard so a self-referential
- * `cause` (cause.cause === cause) terminates without hanging or overflowing.
+ * DoS-safe: one shared `visited` set + total-node budget covers BOTH the `.cause`
+ * edge and the `.errors[]` edge, so a self-referential AggregateError terminates.
+ * First recognizable code wins; `errors[0]` is examined before `errors[1]`.
  */
 function resolveNetworkCode(cause: unknown, explicit?: string): string | undefined {
   if (explicit) return explicit;
 
   const visited = new Set<unknown>();
-  let current: unknown = cause;
+  // Use a stack (DFS) so errors[0] is examined before errors[1] and cause is
+  // examined in document order. The first recognizable code wins.
+  const stack: unknown[] = [cause];
+  let nodesVisited = 0;
+  // Total-node budget: MAX_CAUSE_DEPTH * 4 allows for both .cause chains and
+  // moderate .errors[] fan-out while remaining DoS-safe.
+  const MAX_NODES = MAX_CAUSE_DEPTH * 4;
 
-  for (let depth = 0; depth < MAX_CAUSE_DEPTH; depth++) {
-    if (current === null || current === undefined) return undefined;
-    if (typeof current !== 'object') return undefined;
-    if (visited.has(current)) return undefined; // cycle guard
+  while (stack.length > 0 && nodesVisited < MAX_NODES) {
+    const current = stack.pop();
+
+    if (current === null || current === undefined) continue;
+    if (typeof current !== 'object') continue;
+    if (visited.has(current)) continue; // cycle guard for both edges
+
     visited.add(current);
+    nodesVisited++;
 
-    const code = codeFromCauseNode(current as Record<string, unknown>);
+    const node = current as Record<string, unknown>;
+    const code = codeFromCauseNode(node);
     if (code) return code;
 
-    current = (current as Record<string, unknown>)['cause'];
+    // Enqueue .cause AFTER .errors[] elements so that when the stack is popped
+    // (LIFO), .cause is examined first (pushed last → popped first). This
+    // preserves the original precedence: the direct .cause chain is preferred
+    // over sibling .errors[] members at the same depth.
+    if (Array.isArray(node['errors'])) {
+      // Push in reverse so errors[0] is at the top of the stack (examined first).
+      const errors = node['errors'] as unknown[];
+      for (let i = errors.length - 1; i >= 0; i--) {
+        stack.push(errors[i]);
+      }
+    }
+
+    if (node['cause'] !== undefined) {
+      stack.push(node['cause']);
+    }
   }
 
   return undefined;
+}
+
+/**
+ * Serialize a cause value to a plain, JSON-safe object for inclusion in toJSON().
+ *
+ * Cycle-safe: a shared `visited` Set prevents infinite recursion on circular
+ * cause graphs. Depth-bounded: returns '[MaxDepth]' when `depth >= MAX_CAUSE_DEPTH`
+ * to cap recursion regardless of chain length.
+ *
+ * Fail-safe: every individual field read is wrapped in its own try/catch so
+ * that getters-that-throw, null-prototype objects, and BigInt fields yield a
+ * partial/placeholder rather than propagating an exception. The entire function
+ * body is also wrapped so an unexpected top-level failure returns a placeholder.
+ *
+ * Returns `undefined` for null/undefined/non-object inputs (so an undefined
+ * cause, e.g. from the #37 contentless-network-error case, is simply omitted
+ * from toJSON() output).
+ */
+function serializeCause(
+  cause: unknown,
+  depth: number,
+  visited: Set<unknown>
+): Record<string, unknown> | string | undefined {
+  try {
+    if (cause === null || cause === undefined) return undefined;
+    if (typeof cause !== 'object') return undefined;
+
+    if (visited.has(cause)) return '[Circular]';
+    if (depth >= MAX_CAUSE_DEPTH) return '[MaxDepth]';
+
+    visited.add(cause);
+
+    const node = cause as Record<string, unknown>;
+    const out: Record<string, unknown> = {};
+
+    // Read each field independently — getters may throw.
+    const fields = ['name', 'message', 'code', 'errno', 'syscall', 'address', 'port', 'stack'] as const;
+    for (const field of fields) {
+      try {
+        const val = node[field];
+        if (val !== undefined) out[field] = val;
+      } catch {
+        // getter threw — omit the field rather than propagating
+      }
+    }
+
+    // Recurse into .cause
+    try {
+      const nestedCause = serializeCause(node['cause'], depth + 1, visited);
+      if (nestedCause !== undefined) out['cause'] = nestedCause;
+    } catch {
+      out['cause'] = '[SerializeError]';
+    }
+
+    // Recurse into AggregateError.errors[]
+    try {
+      if (Array.isArray(node['errors'])) {
+        const serializedErrors: Array<Record<string, unknown> | string | undefined> = [];
+        for (const item of node['errors'] as unknown[]) {
+          try {
+            serializedErrors.push(serializeCause(item, depth + 1, visited));
+          } catch {
+            serializedErrors.push('[SerializeError]');
+          }
+        }
+        if (serializedErrors.length > 0) out['errors'] = serializedErrors;
+      }
+    } catch {
+      out['errors'] = '[SerializeError]';
+    }
+
+    return out;
+  } catch {
+    // Outermost catch: exotic cause (null-proto, BigInt coercion, etc.) —
+    // return a placeholder so toJSON() never throws.
+    return '[SerializeError]';
+  }
 }
 
 /**
@@ -316,6 +441,16 @@ function redactQueryParams(rawUrl: string, paramsToRedact: string[]): string {
  *
  * Detection: use `isResilientHttpError(e)` — never `instanceof ResilientHttpError`
  * (brand survives duplicate module installations; instanceof does not).
+ *
+ * toJSON() contract (v2.2+):
+ * - `cause` is serialized via a cycle-safe, depth-bounded, fail-safe serializer
+ *   and emitted when defined. undefined cause is omitted.
+ * - `body` (already capped at construction via maxBodySize) is emitted when defined.
+ * - `meta` is emitted when defined.
+ * - Headers are still redacted via the built-in denylist + any custom `redactHeaders`.
+ * - The message is still capped at DEFAULT_MAX_MESSAGE_SIZE (SEC-001).
+ * The consumer who receives toJSON() output owns any additional redaction
+ * appropriate for their log sink / wire surface.
  */
 export class ResilientHttpError extends Error implements StandardizedError {
   /** Global brand for cross-boundary detection. */
@@ -416,11 +551,26 @@ export class ResilientHttpError extends Error implements StandardizedError {
   /**
    * Return a log/wire-safe JSON representation.
    *
-   * Included: message, kind, statusCode, classification, isRetryable,
-   *           method, url (with query redacted per redactQueryParams),
-   *           code, attempts, requestId, attemptId, headers (redacted).
+   * Included: message (capped at DEFAULT_MAX_MESSAGE_SIZE), kind, statusCode,
+   *           classification, isRetryable, method,
+   *           url (with query redacted per redactQueryParams),
+   *           code, attempts, requestId, attemptId,
+   *           headers (values redacted per denylist + redactHeaders),
+   *           body (capped at maxBodySize, omitted when undefined),
+   *           meta (omitted when undefined),
+   *           cause (serialized via cycle-safe depth-bounded serializer,
+   *                  omitted when undefined).
    *
-   * Excluded: body, cause, meta — these may contain secrets or PII.
+   * Security controls preserved:
+   * - Header values in the denylist (authorization, cookie, x-api-key, etc.)
+   *   and any custom `redactHeaders` are replaced with '[REDACTED]'.
+   * - Query parameter values named in `redactQueryParams` are replaced with
+   *   '[REDACTED]' in the url field; parse failures hide the full query.
+   * - The message field is capped at DEFAULT_MAX_MESSAGE_SIZE (SEC-001) so
+   *   a large body cannot leak via the message field.
+   *
+   * The consumer owns any further redaction appropriate for their log sink
+   * or wire surface (e.g. body fields, cause message content).
    */
   toJSON(): Record<string, unknown> {
     const safeUrl =
@@ -452,6 +602,16 @@ export class ResilientHttpError extends Error implements StandardizedError {
     if (this.requestId !== undefined) out['requestId'] = this.requestId;
     if (this.attemptId !== undefined) out['attemptId'] = this.attemptId;
     if (safeHeaders !== undefined) out['headers'] = safeHeaders;
+
+    // New in v2.2: emit body, meta, and serialized cause when defined.
+    // body is already capped at construction via capBody(maxBodySize).
+    if (this.body !== undefined) out['body'] = this.body;
+    if (this.meta !== undefined) out['meta'] = this.meta;
+
+    // serializeCause returns undefined for null/undefined/non-object causes,
+    // so this safely omits the key when cause is not set (e.g. #37 case).
+    const sc = serializeCause(this.cause, 0, new Set());
+    if (sc !== undefined) out['cause'] = sc;
 
     return out;
   }

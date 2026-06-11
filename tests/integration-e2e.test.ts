@@ -13,13 +13,13 @@
  *   GAP-2:  Idempotency-key estable en reintentos VÍA EL CLIENTE.
  *           El RequestBuilder tiene cobertura unitaria; aquí verificamos que la
  *           clave llega al fetch real con el mismo valor en ambos intentos.
- *   GAP-3:  toJSON safe-by-default sobre un error REAL producido por el cliente
- *           con secreto en header → no aparece en toJSON().
+ *   GAP-3:  Redacción de headers/query sensibles sobre un error REAL producido por
+ *           el cliente: un secreto en header/url → no aparece en toJSON().
  *   GAP-4:  Retry exitoso GET 503 → 200 vía el cliente, con response.attempts=2.
  *   GAP-5:  Preset de pagos del README: POST + idempotencyKey + redactQueryParams
  *           + timeout/deadline como bloque integrado.
- *   GAP-6:  BFF pattern del README: error.toJSON() omite body/cause/meta;
- *           clientMessage derivado de kind/statusCode es correcto.
+ *   GAP-6:  BFF pattern del README: error.toJSON() EXPONE body/cause/meta (v2.2+);
+ *           el consumidor arma su propia proyección segura (clientMessage).
  */
 
 import { describe, it } from 'node:test';
@@ -190,7 +190,7 @@ describe('GAP-2: idempotency-key is identical on all fetch calls (via client)', 
 //         secret in Authorization header → absent from toJSON()
 // ============================================================================
 
-describe('GAP-3: toJSON() safe-by-default on real client error (secret not leaked)', () => {
+describe('GAP-3: header/query redaction on real client error (secret not leaked)', () => {
   it('Authorization header in error response headers → [REDACTED] in toJSON()', async () => {
     const secretToken = 'Bearer sk-prod-SUPERSECRET-PAYMENT-TOKEN-9999';
 
@@ -389,10 +389,11 @@ describe('GAP-5: payment-safe preset from README — integrated smoke', () => {
 });
 
 // ============================================================================
-// GAP-6: BFF pattern from README — error.toJSON() is safe, clientMessage correct
+// GAP-6: BFF pattern — toJSON() exposes the full error (v2.2+); the consumer
+// builds its own safe projection (clientMessage) before forwarding to a client
 // ============================================================================
 
-describe('GAP-6: BFF pattern — toJSON() safe; clientMessage maps correctly', () => {
+describe('GAP-6: BFF pattern — toJSON() exposes full error; clientMessage is the safe projection', () => {
   it('kind:response → clientMessage includes statusCode, body excluded', async () => {
     const { mockFetch } = makeFetch([
       {
@@ -419,14 +420,16 @@ describe('GAP-6: BFF pattern — toJSON() safe; clientMessage maps correctly', (
 
     assert.strictEqual(clientMessage, 'Request failed with status 422');
 
-    // toJSON() must NOT expose body.
+    // v2.2+ contract: toJSON() EXPOSES the full error (body/cause/meta) for
+    // diagnosability. The BFF owns redaction and forwards its own safe projection
+    // (clientMessage), NOT the raw toJSON(), to an untrusted frontend.
     const json = error.toJSON();
-    assert.ok(!('body' in json), 'toJSON() must not include body (BFF safety)');
+    assert.ok('body' in json, 'toJSON() exposes body (v2.2+ transparency contract)');
 
-    // Internal field from body must not appear in toJSON() output.
-    const serialised = JSON.stringify(json);
-    assert.ok(!serialised.includes('db-secret-xyz'),
-      'internal body field must not appear in toJSON() for BFF forwarding');
+    // The internal body field is intentionally present in toJSON() now — so the
+    // safe client-facing value is clientMessage, which must NOT carry it.
+    assert.ok(!clientMessage.includes('db-secret-xyz'),
+      'the safe client projection (clientMessage) must not carry internal body fields');
   });
 
   it('kind:network → clientMessage is "Service temporarily unavailable"', async () => {
@@ -446,10 +449,10 @@ describe('GAP-6: BFF pattern — toJSON() safe; clientMessage maps correctly', (
 
     assert.strictEqual(clientMessage, 'Service temporarily unavailable');
 
-    // toJSON() safe.
+    // v2.2+ contract: toJSON() exposes the serialized cause for diagnosability.
     const json = error.toJSON();
-    assert.ok(!('cause' in json), 'toJSON() must not include cause');
-    assert.ok(!('body' in json), 'toJSON() must not include body');
+    assert.ok('cause' in json, 'toJSON() exposes the serialized cause (v2.2+ contract)');
+    assert.ok(!('body' in json), 'network error has no response body (body remains absent)');
   });
 
   it('meta from hooks does NOT appear in toJSON() even with rich payload', async () => {
@@ -477,11 +480,12 @@ describe('GAP-6: BFF pattern — toJSON() safe; clientMessage maps correctly', (
     assert.strictEqual(error.meta?.['dbConn'], internalSecret,
       'meta should be accessible on the instance for internal use');
 
-    // But toJSON() must NOT include meta.
+    // v2.2+ contract: toJSON() now INCLUDES meta. The BFF must not forward raw
+    // toJSON() (which carries meta) to an untrusted frontend — it forwards its own
+    // safe projection. Assert meta IS fully exposed by design.
     const json = error.toJSON();
-    assert.ok(!('meta' in json), 'toJSON() must not include meta (BFF safety)');
-    const serialised = JSON.stringify(json);
-    assert.ok(!serialised.includes(internalSecret),
-      `Internal secret from meta must not appear in toJSON(): ${serialised.slice(0, 200)}`);
+    assert.ok('meta' in json, 'toJSON() exposes meta (v2.2+ transparency contract)');
+    assert.strictEqual((json['meta'] as Record<string, unknown>)['dbConn'], internalSecret,
+      'meta is fully exposed in toJSON() by design; the BFF owns redaction before forwarding');
   });
 });

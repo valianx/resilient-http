@@ -9,7 +9,8 @@
  *   - The BFF sits between a browser/mobile client and internal microservices.
  *     It must NEVER leak upstream error details (stack traces, internal URLs,
  *     auth tokens, server-side headers) to the browser.
- *   - toJSON() is safe by default: it omits body, cause, and meta.
+ *   - toJSON() exposes body, cause, and meta (v2.2+); the BFF must build its own
+ *     sanitized projection — never return toJSON() verbatim to the browser.
  *   - redactHeaders removes sensitive response headers from toJSON() output.
  *   - The BFF shapes a small, sanitized error object: { code, message } only.
  *   - This example uses a framework-agnostic Request/Response interface so it
@@ -90,8 +91,8 @@ async function proxyUserRequest(
     return { status, body: data };
   } catch (err) {
     if (isResilientHttpError(err)) {
-      // toJSON() already omits body, cause, meta, and redacted headers.
-      // We further restrict to ONLY code + message for the browser.
+      // toJSON() now EXPOSES body/cause/meta (v2.2+), so we never return it verbatim.
+      // We build a minimal, sanitized { code, message } for the browser.
       const safe = {
         code:    err.classification,
         message: mapClassificationToMessage(err.classification),

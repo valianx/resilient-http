@@ -16,9 +16,11 @@
  *   isResilientHttpError(e): type guard — use this, NOT instanceof.
  *     Reason: brand survives duplicate module installations; instanceof does not.
  *
- *   toJSON(): safe-by-default serialisation. Excludes body, cause, meta.
- *     Includes: name, kind, message, classification, isRetryable, attempts,
- *               statusCode?, method?, url?, code?, requestId?, attemptId?, headers?.
+ *   toJSON(): full structured serialisation (v2.2+). Includes name, kind, message,
+ *     classification, isRetryable, attempts, statusCode?, method?, url?, code?,
+ *     requestId?, attemptId?, headers? (sensitive headers redacted), AND body,
+ *     cause, and meta. Sensitive headers are redacted and the message is capped,
+ *     but it is NOT a redaction boundary — sanitize before returning to a client.
  */
 
 import { createResilientHttp, isResilientHttpError } from 'resilient-http';
@@ -135,7 +137,7 @@ export async function example12d(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// Example E: toJSON() — safe serialisation for logs and BFF responses.
+// Example E: toJSON() — full structured serialisation for logs (sanitize before client responses).
 // ---------------------------------------------------------------------------
 
 export async function example12e(): Promise<void> {
@@ -157,9 +159,9 @@ export async function example12e(): Promise<void> {
     console.log(json['classification']); // 'authentication'
     console.log(json['isRetryable']);    // false
 
-    // Fields EXCLUDED from toJSON() (may contain secrets or PII):
-    console.log('body' in json);   // false
-    console.log('cause' in json);  // false
-    console.log('meta' in json);   // false
+    // toJSON() now INCLUDES body/cause/meta when present (v2.2+) — it exposes the
+    // full structured error. Sensitive headers ARE redacted and the message IS
+    // capped, but sanitize before returning errors to an untrusted client.
+    console.log('body' in json);   // true (the 401 response body is exposed)
   }
 }
