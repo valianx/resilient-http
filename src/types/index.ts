@@ -314,9 +314,15 @@ export interface RetryOptions {
   timeout?: number;
 
   /**
-   * Absolute deadline as milliseconds from epoch (Date.now()-compatible).
+   * Absolute deadline as a Unix-millisecond timestamp (Date.now()-compatible).
    * The engine will not start a new attempt if `Date.now() >= deadline`.
    * Also, `effectiveTimeout = min(timeout, deadlineRemaining)` per attempt.
+   *
+   * **Must be absolute, not a relative duration.**
+   * Use `Date.now() + durationMs` — e.g. `Date.now() + 8000` for 8 seconds.
+   * A value below `EPOCH_FLOOR` (1e12, ≈ 2001) is treated as a relative-value
+   * mistake and throws `ResilientHttpError{kind:'setup'}` at construction or
+   * per-request resolution.
    */
   deadline?: number;
 
@@ -396,6 +402,11 @@ export interface ResilientHttpOptions {
   /**
    * Absolute deadline as a Unix-millisecond timestamp (Date.now()-compatible).
    * Forwarded to the retry engine — no new attempt starts after this time.
+   *
+   * **Must be absolute, not a relative duration.**
+   * Use `Date.now() + durationMs` — e.g. `Date.now() + 8000` for 8 seconds.
+   * A value below `EPOCH_FLOOR` (1e12, ≈ 2001) throws `ResilientHttpError{kind:'setup'}`
+   * synchronously at instance construction.
    */
   deadline?: number;
 
@@ -509,6 +520,10 @@ export interface RequestConfig {
 
   /**
    * Override the deadline for this request.
+   *
+   * Must be an absolute Unix-millisecond timestamp (Date.now()-compatible), not
+   * a relative duration. A value below `EPOCH_FLOOR` (1e12, ≈ 2001) causes the
+   * request to reject with `ResilientHttpError{kind:'setup'}`.
    */
   deadline?: number;
 
