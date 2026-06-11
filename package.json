@@ -1,6 +1,6 @@
 {
   "name": "resilient-http",
-  "version": "2.1.1",
+  "version": "2.2.0",
   "description": "Zero-dependency, fetch-first HTTP resilience toolkit: retries with backoff/jitter, per-attempt timeout + total deadline, idempotency-key, interceptor hooks, and standardized errors. Node.js, Bun, browsers.",
   "packageManager": "pnpm@11.1.3",
   "author": "valianx",
