@@ -13,13 +13,13 @@
  *   GAP-2:  Idempotency-key estable en reintentos VÍA EL CLIENTE.
  *           El RequestBuilder tiene cobertura unitaria; aquí verificamos que la
  *           clave llega al fetch real con el mismo valor en ambos intentos.
- *   GAP-3:  toJSON safe-by-default sobre un error REAL producido por el cliente
- *           con secreto en header → no aparece en toJSON().
+ *   GAP-3:  Redacción de headers/query sensibles sobre un error REAL producido por
+ *           el cliente: un secreto en header/url → no aparece en toJSON().
  *   GAP-4:  Retry exitoso GET 503 → 200 vía el cliente, con response.attempts=2.
  *   GAP-5:  Preset de pagos del README: POST + idempotencyKey + redactQueryParams
  *           + timeout/deadline como bloque integrado.
- *   GAP-6:  BFF pattern del README: error.toJSON() omite body/cause/meta;
- *           clientMessage derivado de kind/statusCode es correcto.
+ *   GAP-6:  BFF pattern del README: error.toJSON() EXPONE body/cause/meta (v2.2+);
+ *           el consumidor arma su propia proyección segura (clientMessage).
  */
 
 import { describe, it } from 'node:test';
@@ -190,7 +190,7 @@ describe('GAP-2: idempotency-key is identical on all fetch calls (via client)', 
 //         secret in Authorization header → absent from toJSON()
 // ============================================================================
 
-describe('GAP-3: toJSON() safe-by-default on real client error (secret not leaked)', () => {
+describe('GAP-3: header/query redaction on real client error (secret not leaked)', () => {
   it('Authorization header in error response headers → [REDACTED] in toJSON()', async () => {
     const secretToken = 'Bearer sk-prod-SUPERSECRET-PAYMENT-TOKEN-9999';
 
