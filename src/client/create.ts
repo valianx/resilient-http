@@ -189,7 +189,7 @@ function warnIfRetryWithoutBound(
 
   if (!hasTimeout && !hasDeadline) {
     logger.warn(
-      'resilient-http: retry activo sin timeout/deadline: posible cuelgue indefinido',
+      'resilient-http: retry enabled without timeout/deadline — possible indefinite hang',
       { maxAttempts }
     );
   }

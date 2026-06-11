@@ -9,13 +9,11 @@ export {
 
 export type { JitterConfig } from './jitter';
 export {
-  DEFAULT_JITTER_CONFIG,
   fullJitter,
   equalJitter,
   decorrelatedJitter,
   noJitter,
   applyJitter,
-  calculateDelayWithJitter,
 } from './jitter';
 
 // Internal classification helpers (not re-exported from src/index.ts)
