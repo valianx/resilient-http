@@ -315,23 +315,23 @@ export interface AttemptContext {
   attempt: number;
 }
 
+// ---------------------------------------------------------------------------
+// Shared retry loop
+// ---------------------------------------------------------------------------
+
 /**
- * Execute `fn` with full retry, timeout, deadline, and signal semantics.
+ * Internal shared retry loop used by both exported wrappers.
  *
- * `fn` receives an `AttemptContext` with a per-attempt composite signal.
- * The engine classifies errors using `core/classify.ts` only — never `errors/extractor.ts`.
- *
- * @param fn - The async operation to retry.
- * @param options - Retry configuration.
- * @param method - HTTP method of the request (upper-case, e.g. 'GET').
- *   Used for the method gate when the error has no embedded method.
- * @returns The result of a successful attempt.
- * @throws The last error when all attempts are exhausted or a hard cap fires.
+ * Signal-only branches (fast-path caller.aborted check, isCallerAbort priority
+ * propagation, and sleepWithAbort vs sleep) are guarded on
+ * `callerSignal !== undefined` so the non-signal path is byte-for-byte
+ * equivalent to the original executeWithRetry.
  */
-export async function executeWithRetry<T>(
+async function runRetryLoop<T>(
   fn: (ctx: AttemptContext) => Promise<T>,
-  options: RetryOptions = {},
-  method?: string
+  options: RetryOptions,
+  method: string | undefined,
+  callerSignal: AbortSignal | undefined
 ): Promise<T> {
   const config = resolveConfig(options);
 
@@ -339,12 +339,18 @@ export async function executeWithRetry<T>(
   let previousDelay = config.initialDelay;
 
   for (let attempt = 1; attempt <= config.maxAttempts; attempt++) {
+    // Fast-path: caller already aborted (signal path only).
+    if (callerSignal !== undefined && callerSignal.aborted) {
+      throw new DOMException('Retry aborted by caller', 'AbortError');
+    }
+
     // Hard cap: deadline check before starting the attempt.
     if (config.deadline !== undefined && Date.now() >= config.deadline) {
       break;
     }
 
     const { signal, cleanup } = buildAttemptSignal({
+      callerSignal,
       timeout: config.timeout,
       deadlineAt: config.deadline,
     });
@@ -354,6 +360,17 @@ export async function executeWithRetry<T>(
       return result;
     } catch (error) {
       lastError = error;
+
+      // Caller abort takes priority — propagate immediately, no retry (signal path only).
+      if (callerSignal !== undefined) {
+        if (isCallerAbort(error, callerSignal)) {
+          throw error;
+        }
+        if (callerSignal.aborted) {
+          throw new DOMException('Retry aborted by caller', 'AbortError');
+        }
+      }
+
       const meta = extractMetadata(error);
       const effectiveMethod = method ?? meta.method;
 
@@ -411,7 +428,16 @@ export async function executeWithRetry<T>(
 
       config.onRetry?.(error, attempt, delay);
 
-      await sleep(delay);
+      // Sleep with abort support on the signal path; plain sleep otherwise.
+      if (callerSignal !== undefined) {
+        try {
+          await sleepWithAbort(delay, callerSignal);
+        } catch {
+          throw new DOMException('Retry aborted by caller', 'AbortError');
+        }
+      } else {
+        await sleep(delay);
+      }
     } finally {
       cleanup();
     }
@@ -423,6 +449,31 @@ export async function executeWithRetry<T>(
   // classification:'timeout' with a contentful message rather than throwing
   // undefined and producing a contentless Network error.
   throw lastError ?? new DOMException('deadline exceeded before any request attempt', 'TimeoutError');
+}
+
+// ---------------------------------------------------------------------------
+// Exported wrappers (thin delegators — keep both names for stable imports)
+// ---------------------------------------------------------------------------
+
+/**
+ * Execute `fn` with full retry, timeout, deadline, and signal semantics.
+ *
+ * `fn` receives an `AttemptContext` with a per-attempt composite signal.
+ * The engine classifies errors using `core/classify.ts` only — never `errors/extractor.ts`.
+ *
+ * @param fn - The async operation to retry.
+ * @param options - Retry configuration.
+ * @param method - HTTP method of the request (upper-case, e.g. 'GET').
+ *   Used for the method gate when the error has no embedded method.
+ * @returns The result of a successful attempt.
+ * @throws The last error when all attempts are exhausted or a hard cap fires.
+ */
+export async function executeWithRetry<T>(
+  fn: (ctx: AttemptContext) => Promise<T>,
+  options: RetryOptions = {},
+  method?: string
+): Promise<T> {
+  return runRetryLoop(fn, options, method, undefined);
 }
 
 /**
@@ -438,106 +489,5 @@ export async function executeWithRetryAndSignal<T>(
   options: RetryOptions = {},
   method?: string
 ): Promise<T> {
-  const config = resolveConfig(options);
-
-  let lastError: unknown;
-  let previousDelay = config.initialDelay;
-
-  for (let attempt = 1; attempt <= config.maxAttempts; attempt++) {
-    // Fast-path: caller already aborted.
-    if (callerSignal.aborted) {
-      throw new DOMException('Retry aborted by caller', 'AbortError');
-    }
-
-    // Hard cap: deadline check.
-    if (config.deadline !== undefined && Date.now() >= config.deadline) {
-      break;
-    }
-
-    const { signal, cleanup } = buildAttemptSignal({
-      callerSignal,
-      timeout: config.timeout,
-      deadlineAt: config.deadline,
-    });
-
-    try {
-      const result = await fn({ signal, attempt });
-      return result;
-    } catch (error) {
-      lastError = error;
-
-      // Caller abort takes priority — propagate immediately, no retry.
-      if (isCallerAbort(error, callerSignal)) {
-        throw error;
-      }
-      if (callerSignal.aborted) {
-        throw new DOMException('Retry aborted by caller', 'AbortError');
-      }
-
-      const meta = extractMetadata(error);
-      const effectiveMethod = method ?? meta.method;
-
-      const { isRetryable, classification } = classifyAttemptError(
-        error,
-        meta,
-        config,
-        effectiveMethod
-      );
-
-      const isLastAttempt = attempt >= config.maxAttempts;
-
-      const ctx: RetryHookContext = {
-        error,
-        attempt,
-        statusCode: meta.statusCode,
-        method: effectiveMethod,
-        gateAllows: isRetryable && !isLastAttempt,
-      };
-
-      const shouldContinue = !isLastAttempt && (await evaluateShouldRetry(ctx, config.shouldRetry));
-
-      if (!isRetryable || !shouldContinue) {
-        config.onFailure?.(error, attempt);
-        break;
-      }
-
-      let delay: number;
-
-      if (
-        config.respectRetryAfter &&
-        meta.retryAfterMs !== undefined &&
-        classification === 'rate-limit'
-      ) {
-        if (meta.retryAfterMs > config.maxRetryAfter) {
-          config.onFailure?.(error, attempt);
-          break;
-        }
-        delay = meta.retryAfterMs;
-      } else {
-        delay = calculateDelay(attempt - 1, previousDelay, config);
-        previousDelay = delay;
-      }
-
-      if (delayExceedsDeadline(delay, config.deadline)) {
-        config.onFailure?.(error, attempt);
-        break;
-      }
-
-      config.onRetry?.(error, attempt, delay);
-
-      // Sleep with abort support to react to caller cancellation during wait.
-      try {
-        await sleepWithAbort(delay, callerSignal);
-      } catch {
-        throw new DOMException('Retry aborted by caller', 'AbortError');
-      }
-    } finally {
-      cleanup();
-    }
-  }
-
-  // fix(deadline): same guard as executeWithRetry — when the deadline hard cap
-  // breaks the loop before any attempt, lastError is undefined; throw a
-  // TimeoutError DOMException for a contentful classification:'timeout' error.
-  throw lastError ?? new DOMException('deadline exceeded before any request attempt', 'TimeoutError');
+  return runRetryLoop(fn, options, method, callerSignal);
 }
