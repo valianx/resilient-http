@@ -1,5 +1,25 @@
 # Changelog
 
+## 2.2.0
+
+### Minor Changes
+
+- 8b45d3a: feat(errors): expose the real error in `toJSON()` (cause/body/meta) + resolve network code from AggregateError/errno
+
+  `ResilientHttpError` now surfaces the full structured error instead of masking it.
+  - **`toJSON()` now exposes `cause` (serialized), `body`, and `meta`.** Previously these were dropped on the assumption they "may contain secrets" — but that is a redaction decision the library cannot make on the consumer's behalf (it does not know which fields are sensitive in a given app). The library's job is to expose the structured error; the consuming app decides what to redact, log, or show. **Sensitive-header redaction (`redactHeaders`) and the message-size cap are retained** as the opt-in primitives the consumer controls.
+  - **Network `code` now resolves through `AggregateError.errors[]` and `errno`.** undici buries the real `ECONNREFUSED` / `ENOTFOUND` inside an `AggregateError` (multi-address connect failures) or in `errno`; the cause-walk now descends both, so `error.code` is populated and the message reads `Network error: ECONNREFUSED` instead of a bare `Network error`. The walk is bounded + cycle-guarded; the new cause serializer is fail-safe (never throws).
+
+  **⚠️ Behavior change:** `toJSON()` is no longer safe to forward verbatim to an untrusted client (the previously documented "BFF pattern"). Build a sanitized projection before returning errors to a browser; `redactHeaders` / `redactQueryParams` and the message cap still apply. Fixes #36.
+
+- 68f0333: fix(deadline): reject relative `deadline` values with a clear setup error + never throw `undefined`
+
+  A `deadline` configured as a relative duration (e.g. `deadline: 8000`) previously made **every** request fail instantly with a contentless `Network error` — `fetch` was never called, because the engine compares `deadline` as an absolute epoch (`Date.now() >= 8000` is always true) and then `throw lastError` threw `undefined`.
+  - **Guardrail:** `deadline` remains an absolute `Date.now()`-based timestamp. A value below `1e12` (≈ year 2001) is now rejected as a relative-value mistake with a descriptive `ResilientHttpError{kind:'setup'}` — both at client construction and per request — e.g. `"deadline 8000 looks like a relative duration; deadline is an absolute Date.now()-based timestamp — did you mean Date.now() + 8000?"`.
+  - **Never throw `undefined`:** when the retry loop exits before any attempt runs (a legitimately-past absolute deadline), it now surfaces a meaningful `classification:'timeout'` error instead of a contentless `Network error`.
+
+  No new options; `deadline` semantics are unchanged for correct (absolute) usage. Fixes #37.
+
 ## 2.1.1
 
 ### Patch Changes
