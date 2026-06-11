@@ -6,22 +6,19 @@
 
 **What this library does:**
 - Provides framework-agnostic HTTP resilience patterns for Node.js, Bun, and browsers
-- Implements retry logic with exponential backoff, linear backoff, and constant backoff strategies
-- Implements jitter algorithms (full, equal, decorrelated) to prevent thundering herd problems
-- Provides circuit breaker pattern for preventing cascading failures
-- Extracts and standardizes errors from various HTTP clients (Axios, Fetch, Got, Undici, node-fetch)
+- Wraps any `fetch`-compatible call with retry (exponential/linear/constant backoff + jitter)
+- Manages per-attempt timeouts, absolute deadlines, and caller `AbortSignal` composition
+- Extracts and standardizes HTTP errors into a single `ResilientHttpError` with three kinds
+- Provides a lifecycle hook system (`onRequest` / `onResponse` / `onRetry` / `onFailure`)
 - Zero runtime dependencies, tree-shakeable design
 
 **Non-goals / What this is NOT:**
-- NOT an HTTP client (wraps any HTTP client)
+- NOT an HTTP client (wraps any fetch-compatible function)
 - NOT a backend service or API (it's a library/npm package)
+- Does NOT include circuit breakers, bulkheads, rate limiters, or RxJS integration (removed in v2.0.0)
 - Does NOT include frontend/UI components
 - Does NOT include database, ORM, or messaging infrastructure
 - Does NOT enforce specific architectural patterns (hexagonal, DDD, etc.)
-
-**External Dependencies:**
-- RxJS is an optional peer dependency for observable integrations
-- Works with any HTTP client (Axios, fetch, got, undici, node-fetch)
 
 ---
 
@@ -30,39 +27,57 @@
 ```
 resilient-http/
 ├── src/                          # Source code
-│   ├── index.ts                  # Main entry - barrel exports
+│   ├── index.ts                  # Main entry — public barrel export
 │   ├── types/
 │   │   └── index.ts              # All TypeScript type definitions
-│   ├── core/
-│   │   ├── index.ts              # Core algorithms barrel export
-│   │   ├── backoff.ts            # Backoff strategies (exponential, linear, constant)
-│   │   └── jitter.ts             # Jitter algorithms (full, equal, decorrelated, none)
+│   ├── client/
+│   │   ├── index.ts              # Client barrel re-export
+│   │   ├── create.ts             # createResilientHttp factory + method shortcuts
+│   │   ├── request-builder.ts    # RequestBuilder — constructs fetch Request per attempt
+│   │   └── response.ts           # parseResponse — body parsing, validateStatus
+│   ├── hooks/
+│   │   ├── index.ts              # Hooks barrel re-export
+│   │   └── run.ts                # Hook runners (request / response / retry / failure)
 │   ├── retry/
-│   │   ├── index.ts              # Retry barrel export
-│   │   └── retry.ts              # retry(), retryWithSignal(), withRetry()
-│   ├── circuit-breaker/
-│   │   ├── index.ts              # Circuit breaker barrel export
-│   │   └── circuit-breaker.ts    # CircuitBreaker class, withCircuitBreaker()
+│   │   ├── index.ts              # Retry barrel (internal, not public)
+│   │   └── engine.ts             # executeWithRetry / executeWithRetryAndSignal
+│   ├── core/
+│   │   ├── index.ts              # Core barrel (internal, not public)
+│   │   ├── backoff.ts            # calculateBackoff — exponential / linear / constant
+│   │   ├── jitter.ts             # applyJitter — full / equal / decorrelated / none
+│   │   ├── classify.ts           # classifyError / isRetryableError
+│   │   ├── validate.ts           # validateDeadline guardrail
+│   │   ├── signals.ts            # buildAttemptSignal / isCallerAbort
+│   │   └── message.ts            # extractMessageFromBody
 │   ├── errors/
-│   │   ├── index.ts              # Error barrel export
-│   │   └── extractor.ts          # Error extraction, classification, retry predicates
+│   │   ├── index.ts              # Errors barrel re-export
+│   │   └── resilient-http-error.ts  # ResilientHttpError + isResilientHttpError
 │   └── utils/
-│       ├── index.ts              # Utilities barrel export
-│       ├── sleep.ts              # sleep(), sleepWithAbort()
-│       └── random.ts             # randomBetween(), randomFloatBetween()
-├── tests/                        # Test files
-│   ├── backoff.test.ts           # Backoff strategy tests
-│   ├── jitter.test.ts            # Jitter algorithm tests
-│   ├── error-extraction.test.ts  # Error extraction tests
-│   └── circuit-breaker.test.ts   # Circuit breaker tests
+│       ├── index.ts              # Utils barrel re-export
+│       ├── sleep.ts              # sleep() / sleepWithAbort()
+│       └── random.ts             # randomBetween() / randomFloatBetween()
+├── tests/                        # Test files (*.test.ts)
+│   ├── backoff.test.ts
+│   ├── jitter.test.ts
+│   ├── signals.test.ts
+│   ├── error-extraction.test.ts
+│   ├── retry-engine.test.ts
+│   ├── client.test.ts
+│   ├── hooks.test.ts
+│   ├── resilient-http-error.test.ts
+│   ├── timeout-signal.test.ts
+│   ├── mutation-gaps.test.ts
+│   ├── integration-e2e.test.ts
+│   └── dist-smoke.test.ts
 ├── docs/
-│   └── ARCHITECTURE.md           # Architecture design document
+│   ├── ARCHITECTURE.md           # Architecture note (v2.x)
+│   └── configuration.md          # Full configuration reference
 ├── dist/                         # Build output (generated, gitignored)
 ├── package.json                  # Package manifest
 ├── tsconfig.json                 # TypeScript configuration
 ├── tsup.config.ts                # Build configuration (tsup)
 └── .github/workflows/            # CI/CD
-    ├── ci.yml                    # CI pipeline (Node 18/20/22 + Bun)
+    ├── ci.yml                    # CI pipeline (Node 22/24/26 + Bun)
     └── publish.yml               # npm publish on release
 ```
 
@@ -73,13 +88,13 @@ resilient-http/
 | Component | Technology |
 |-----------|------------|
 | **Language** | TypeScript 5.3+ |
-| **Runtime** | Node.js 18+ / Bun 1.0+ / Browsers (ESM) |
+| **Runtime** | Node.js 22+ / Bun 1.0+ / Browsers (ESM) |
 | **Module Format** | Dual ESM + CJS (ESM primary) |
 | **Build Tool** | tsup 8.x |
 | **Type Definitions** | .d.ts generated by tsup |
-| **Test Runner** | Bun test (primary), Node.js test runner (secondary) |
-| **Package Manager** | Yarn (CI uses frozen lockfile) |
-| **Target** | ES2020 |
+| **Test Runner** | Bun test (primary), Node.js `--test` runner (secondary) |
+| **Package Manager** | pnpm (CI uses frozen lockfile) |
+| **Target** | ES2022 / lib ES2023 |
 
 ---
 
@@ -89,33 +104,36 @@ All commands verified from `package.json` scripts:
 
 ```bash
 # Install dependencies
-yarn install
+pnpm install
 
 # Type checking (no emit)
-yarn typecheck
+pnpm typecheck
 
 # Build (ESM + CJS + types)
-yarn build
+pnpm build
 
 # Watch mode for development
-yarn dev
+pnpm dev
 
 # Run tests with Bun
-yarn test         # or: bun test
+pnpm test         # or: bun test
 
 # Run tests with Node.js
-yarn test:node    # node --import tsx --test tests/*.test.ts
+pnpm test:node
+
+# Mutation testing (Stryker — nightly, report only)
+pnpm test:mutation
 
 # Lint source files
-yarn lint
+pnpm lint
 
 # Format source files
-yarn format
+pnpm format
 ```
 
 **Pre-publish:**
 ```bash
-yarn build        # Runs automatically via prepublishOnly
+pnpm build        # Runs automatically via prepublishOnly
 ```
 
 ---
@@ -130,8 +148,9 @@ This library follows a **modular, tree-shakeable design**:
    - `types` → type definitions only
    - `core` → depends on `types`, `utils`
    - `errors` → depends on `types`
-   - `retry` → depends on `core`, `errors`, `utils`
-   - `circuit-breaker` → depends on `types`
+   - `hooks` → depends on `types`
+   - `retry/engine` → depends on `core`, `utils`, `types`
+   - `client` → depends on all of the above
 3. **Tree-Shakeable**: `sideEffects: false` in package.json enables dead code elimination
 4. **Dual Module Output**: Both ESM and CJS builds for maximum compatibility
 5. **Conditional Exports**: Package exports support different environments (Node, Bun, browsers)
@@ -140,8 +159,8 @@ This library follows a **modular, tree-shakeable design**:
 - Keep each module cohesive and focused on a single responsibility
 - Avoid adding runtime dependencies (zero-dependency is a key feature)
 - All public APIs must be typed with JSDoc documentation
-- Use strategy patterns for extensibility (backoff, jitter, error extraction)
-- HTTP client detection should be non-intrusive and fallback gracefully
+- Use strategy patterns for extensibility (backoff, jitter)
+- Fail-safe method gate must never be bypassed: unknown HTTP method → no retry
 
 **Architecture Changes:**
 - New resilience patterns or significant API changes should be documented in `docs/ARCHITECTURE.md`
@@ -156,47 +175,46 @@ This library follows a **modular, tree-shakeable design**:
 
 **Main Entry (`resilient-http`):**
 ```typescript
-import { retry, CircuitBreaker, extractError } from 'resilient-http';
+import { createResilientHttp, ResilientHttpError, isResilientHttpError } from 'resilient-http';
 ```
 
-**Sub-module Imports (tree-shakeable):**
-```typescript
-import { retry } from 'resilient-http/retry';
-import { CircuitBreaker } from 'resilient-http/circuit-breaker';
-import { extractError } from 'resilient-http/errors';
-import { calculateBackoff, applyJitter } from 'resilient-http/core';
-import { sleep } from 'resilient-http/utils';
-```
+There are no sub-path imports in v2. The v1 sub-paths (`resilient-http/retry`,
+`resilient-http/errors`, `resilient-http/core`, `resilient-http/utils`) were removed in v2.0.0.
 
 ### Core Types (from `src/types/index.ts`)
 
 | Type | Purpose |
 |------|---------|
-| `RetryOptions` | Configuration for retry behavior |
-| `CircuitBreakerOptions` | Configuration for circuit breaker |
-| `CircuitState` | 'closed' \| 'open' \| 'half-open' |
-| `CircuitMetrics` | Metrics for monitoring |
-| `StandardizedError` | Unified error representation |
-| `ErrorClassification` | Error category for retry decisions |
-| `BackoffStrategy` | 'exponential' \| 'linear' \| 'constant' |
-| `JitterStrategy` | 'full' \| 'equal' \| 'decorrelated' \| 'none' |
+| `ResilientHttpOptions` | Instance-level configuration for `createResilientHttp()` |
+| `RequestConfig` | Per-request overrides |
+| `ResilientResponse<T>` | Typed response wrapper (`data`, `status`, `headers`) |
+| `ResilientHttpClient` | Client instance interface |
+| `RetryOptions` | Retry behavior configuration |
+| `HookSet` | Lifecycle hooks (`onRequest` / `onResponse` / `onRetry` / `onFailure`) |
+| `HookContext` | Context object passed to hooks |
+| `ErrorClassification` | `'network' \| 'timeout' \| 'server' \| 'rate-limit' \| 'client' \| ...` |
+| `ErrorKind` | `'response' \| 'network' \| 'setup'` |
+| `StandardizedError` | Interface for the structured error surface |
+| `BackoffStrategy` | `'exponential' \| 'linear' \| 'constant'` |
+| `JitterStrategy` | `'full' \| 'equal' \| 'decorrelated' \| 'none'` |
 
 ### Adding New Features
 
 1. **New Backoff Strategy**: Add function to `src/core/backoff.ts`, update `calculateBackoff()` switch
 2. **New Jitter Algorithm**: Add function to `src/core/jitter.ts`, update `applyJitter()` switch
-3. **New HTTP Client Support**: Add extractor function in `src/errors/extractor.ts`, update `detectClientType()` and `extractError()`
-4. **New Resilience Pattern**: Create new module under `src/`, add to main exports
+3. **New Resilience Pattern**: Create new module under `src/`, add to `src/index.ts` exports
 
 ---
 
 ## Security & Compliance
 
 - **Secrets**: None stored or processed (this is a utility library)
-- **Error Extraction**: Error messages may contain URLs; consider sanitization in logging contexts
+- **Error Exposure**: `toJSON()` exposes `cause`/`body`/`meta`; consumer is responsible for redaction
+- **Header Redaction**: Built-in denylist (Authorization, Cookie, etc.) + configurable `redactHeaders`
+- **Query-param Redaction**: Opt-in via `redactQueryParams`; not enabled by default
 - **No PII Processing**: Library does not inspect request/response bodies (except error messages)
 - **Timeout Enforcement**: All retry operations respect configured timeouts to prevent infinite loops
-- **Circuit Breaker Limits**: Configurable thresholds prevent resource exhaustion
+- **Fail-safe Method Gate**: Unknown HTTP method → no retry (prevents double-charge on payments)
 
 ---
 
@@ -205,14 +223,9 @@ import { sleep } from 'resilient-http/utils';
 This library provides hooks for observability integration:
 
 ```typescript
-// Retry callbacks
+// Retry/failure observer callbacks (also available as hooks)
 onRetry?: (error: unknown, attempt: number, nextDelay: number) => void;
 onFailure?: (error: unknown, attempts: number) => void;
-
-// Circuit breaker callbacks
-onOpen?: () => void;
-onClose?: () => void;
-onHalfOpen?: () => void;
 
 // Logger interface (compatible with console, winston, pino, etc.)
 interface Logger {
@@ -231,13 +244,14 @@ interface Logger {
 - `feature/*` - New features
 - `fix/*` - Bug fixes
 - `hotfix/*` - Urgent production fixes
+- `chore/*` - Maintenance, docs, hygiene
 
 **Commit Messages:**
 - Follow conventional commits: `feat:`, `fix:`, `docs:`, `test:`, `chore:`
 - Example: `feat: add decorrelated jitter strategy`
 
 **Pull Requests:**
-- Run `yarn typecheck && yarn build && yarn test` before submitting
+- Run `pnpm typecheck && pnpm build && pnpm test` before submitting
 - Update CHANGELOG.md under `[Unreleased]` section
 - Update README.md if public API changes
 
@@ -274,24 +288,15 @@ interface Logger {
 
 ---
 
-## Known TBDs
-
-- RxJS observable operators (`src/observable/`) - documented in architecture but not yet implemented
-- Additional HTTP client extractors (superagent, request) - currently fall back to generic
-
----
-
 ## Quick Reference
 
 ```bash
 # Development workflow
-yarn install          # Install deps
-yarn dev              # Watch mode
-yarn test             # Run tests
-yarn typecheck        # Type check
-yarn build            # Build for release
-
-# Test specific file
-bun test tests/retry.test.ts
-node --import tsx --test tests/retry.test.ts
+pnpm install          # Install deps
+pnpm dev              # Watch mode
+pnpm test             # Run tests (Bun)
+pnpm test:node        # Run tests (Node.js)
+pnpm typecheck        # Type check
+pnpm build            # Build for release
+pnpm test:mutation    # Mutation testing (Stryker, nightly)
 ```
