@@ -48,7 +48,7 @@ const client = createResilientHttp({
 | `fetch` | `typeof globalThis.fetch` | `globalThis.fetch` | Inject a custom fetch implementation (tests, edge runtimes, etc.). |
 | `logger` | `Logger` | — | Receives internal warnings (e.g. retry configured without timeout). See [16-headers-and-logger.ts](./use-cases/16-headers-and-logger.ts). |
 | `redactHeaders` | `string[]` | `[]` | Additional header names to redact in `toJSON()` output. Merged with the built-in denylist. See [13-redaction.ts](./use-cases/13-redaction.ts). |
-| `redactQueryParams` | `string[]` | `[]` | Query-param names whose values are replaced with `[REDACTED]` in the `toJSON()` url field. See [13-redaction.ts](./use-cases/13-redaction.ts). |
+| `redactQueryParams` | `string[]` | `[]` | Query-param names whose values are replaced with `[REDACTED]` in the `toJSON()` url field. **Opt-in** — not enabled by default. Enable this when your URLs carry secrets (API keys, tokens, session IDs) and you log `toJSON()` output to an external service. See [13-redaction.ts](./use-cases/13-redaction.ts). |
 | `idempotencyKey` | `true \| string \| (() => string)` | — | Idempotency key applied to all requests. The key is frozen per logical operation — all retry attempts reuse the same key. See [15-idempotency-key.ts](./use-cases/15-idempotency-key.ts). |
 | `idempotencyHeader` | `string` | `'Idempotency-Key'` | Header name used to attach the idempotency key. See [15-idempotency-key.ts](./use-cases/15-idempotency-key.ts). |
 
@@ -340,6 +340,25 @@ www-authenticate
 
 Additional names can be added per instance via `redactHeaders: ['x-my-secret']`.
 
-Additional query-param names can be redacted via `redactQueryParams: ['token', 'api_key']`.
+### Query-param redaction (opt-in)
+
+`redactQueryParams` is **not enabled by default**. The library cannot know which query
+parameters carry secrets in your application, so you must declare them explicitly.
+
+```typescript
+const client = createResilientHttp({
+  baseURL: 'https://api.example.com',
+  redactQueryParams: ['api_key', 'token', 'secret', 'access_token'],
+});
+```
+
+When configured, the matching param values are replaced with `[REDACTED]` in the `url`
+field emitted by `toJSON()`. The raw `url` property on the error instance is never
+modified — only the serialized output is redacted.
+
+**When you need this:** if you log `err.toJSON()` to an external logging service and your
+API URLs carry secrets as query parameters (common for signed URLs, webhook callbacks, or
+legacy APIs that pass API keys in query strings), `redactQueryParams` prevents those
+credentials from appearing in your logs.
 
 See [13-redaction.ts](./use-cases/13-redaction.ts).
