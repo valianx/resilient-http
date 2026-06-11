@@ -747,6 +747,374 @@ describe('AC-7: observers and lifecycle', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Issue #37 — AC-5: Bug A — executeWithRetry with past deadline never calls fn
+// ---------------------------------------------------------------------------
+
+describe('AC-5 (#37): executeWithRetry — past absolute deadline → fetch never called, classification:timeout', () => {
+  it('fn is never called when deadline is already past, error has classification:timeout', async () => {
+    let fnCallCount = 0;
+
+    // deadline is already expired — engine should break before calling fn.
+    const pastDeadline = Date.now() - 1;
+
+    let caughtError: unknown;
+    try {
+      await executeWithRetry(
+        async () => {
+          fnCallCount++;
+          return 'should not reach here';
+        },
+        { deadline: pastDeadline, maxAttempts: 3 },
+        'GET'
+      );
+    } catch (e) {
+      caughtError = e;
+    }
+
+    assert.strictEqual(fnCallCount, 0, 'fn must NEVER be called when deadline is past');
+    assert.ok(caughtError !== undefined, 'must throw, not resolve');
+    assert.ok(caughtError !== null, 'must throw a non-null error (Bug A: not undefined)');
+    assert.notStrictEqual(typeof caughtError, 'undefined', 'must not throw undefined (Bug A regression)');
+
+    // The error must be a DOMException with name TimeoutError (unwrapped engine level).
+    assert.ok(
+      caughtError instanceof DOMException && caughtError.name === 'TimeoutError',
+      `expected TimeoutError DOMException, got: ${caughtError instanceof Error ? caughtError.name : String(caughtError)}`
+    );
+    assert.ok(
+      (caughtError as DOMException).message.length > 0,
+      'error message must be contentful (not empty)'
+    );
+    assert.ok(
+      (caughtError as DOMException).message.includes('deadline'),
+      `message should mention "deadline", got: "${(caughtError as DOMException).message}"`
+    );
+    // Pin the exact message so a mutant that drops/changes the DOMException string fails.
+    assert.strictEqual(
+      (caughtError as DOMException).message,
+      'deadline exceeded before any request attempt',
+      'exact fallback message must match — pins the ?? DOMException branch'
+    );
+  });
+
+  // ---------------------------------------------------------------------------
+  // Bug-A counter-case: lastError IS set (real attempt ran) → REAL error is thrown,
+  // NOT the ?? fallback DOMException.
+  //
+  // Mutation-kill target: a mutant that replaces `throw lastError ?? new DOMException(...)`
+  // with `throw new DOMException(...)` (always throws fallback) would fail this test because
+  // the thrown error would be a DOMException, not the original Error object.
+  // ---------------------------------------------------------------------------
+  it('when a real attempt ran before deadline elapses, the real error is thrown — not the ?? fallback', async (t) => {
+    enableFakeTimers(t, { includeDate: true });
+
+    // Set deadline 10ms ahead. The first attempt will execute immediately and fail.
+    // After that, the calculated inter-attempt delay (50ms via constant backoff, jitter:none,
+    // initialDelay:50) would exceed the remaining deadline, so delayExceedsDeadline
+    // fires, onFailure is called, and the loop breaks with lastError set to realError.
+    const realError = makeError({ statusCode: 503, message: 'real service error' });
+
+    let fnCallCount = 0;
+    let onFailureCalled = false;
+    let caughtError: unknown;
+
+    const p = executeWithRetry(
+      async () => {
+        fnCallCount++;
+        throw realError;
+      },
+      {
+        maxAttempts: 5,
+        initialDelay: 50,
+        jitter: 'none',
+        backoff: 'constant',
+        deadline: Date.now() + 10,
+        onFailure: () => { onFailureCalled = true; },
+      },
+      'GET'
+    ).catch((e) => { caughtError = e; });
+
+    await flush();
+    await tick(10); // deadline expires after first attempt
+    await flush();
+    await p;
+
+    assert.strictEqual(fnCallCount, 1, 'exactly one attempt must have run');
+    assert.ok(onFailureCalled, 'onFailure must have been called (delayExceedsDeadline path)');
+
+    // The thrown error must be the REAL error from the attempt — not the DOMException fallback.
+    assert.ok(caughtError !== undefined, 'must throw');
+    assert.ok(
+      !(caughtError instanceof DOMException && (caughtError as DOMException).name === 'TimeoutError'),
+      'must NOT throw the ?? DOMException fallback when lastError is set'
+    );
+    assert.strictEqual(
+      caughtError,
+      realError,
+      'must throw the exact real error object from the failed attempt, not the fallback'
+    );
+
+    resetTimers();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #37 — AC-6: Bug A — executeWithRetryAndSignal with past deadline
+// ---------------------------------------------------------------------------
+
+describe('AC-6 (#37): executeWithRetryAndSignal — past absolute deadline → fetch never called, classification:timeout', () => {
+  it('fn is never called when deadline is already past, error is a contentful TimeoutError', async () => {
+    let fnCallCount = 0;
+
+    const pastDeadline = Date.now() - 1;
+    const controller = new AbortController(); // non-aborted caller signal
+
+    let caughtError: unknown;
+    try {
+      await executeWithRetryAndSignal(
+        async () => {
+          fnCallCount++;
+          return 'should not reach here';
+        },
+        controller.signal,
+        { deadline: pastDeadline, maxAttempts: 3 },
+        'GET'
+      );
+    } catch (e) {
+      caughtError = e;
+    }
+
+    assert.strictEqual(fnCallCount, 0, 'fn must NEVER be called when deadline is past');
+    assert.ok(caughtError !== undefined, 'must throw, not resolve');
+    assert.notStrictEqual(typeof caughtError, 'undefined', 'must not throw undefined (Bug A regression)');
+
+    assert.ok(
+      caughtError instanceof DOMException && caughtError.name === 'TimeoutError',
+      `expected TimeoutError DOMException, got: ${caughtError instanceof Error ? caughtError.name : String(caughtError)}`
+    );
+    assert.ok(
+      (caughtError as DOMException).message.length > 0,
+      'error message must be contentful (not empty)'
+    );
+    assert.ok(
+      (caughtError as DOMException).message.includes('deadline'),
+      `message should mention "deadline", got: "${(caughtError as DOMException).message}"`
+    );
+    // Pin the exact message so a mutant that drops/changes the DOMException string fails.
+    assert.strictEqual(
+      (caughtError as DOMException).message,
+      'deadline exceeded before any request attempt',
+      'exact fallback message must match — pins the ?? DOMException branch in executeWithRetryAndSignal'
+    );
+  });
+
+  // ---------------------------------------------------------------------------
+  // Bug-A counter-case: lastError IS set → REAL error is thrown, NOT the fallback.
+  //
+  // Mutation-kill target: a mutant replacing `throw lastError ?? new DOMException(...)`
+  // with `throw new DOMException(...)` would surface a DOMException instead of the
+  // real error, failing this assertion.
+  // ---------------------------------------------------------------------------
+  it('when a real attempt ran before deadline elapses (signal path), the real error is thrown — not the fallback', async (t) => {
+    enableFakeTimers(t, { includeDate: true });
+
+    const realError = makeError({ statusCode: 503, message: 'real service error (signal path)' });
+    const controller = new AbortController();
+
+    let fnCallCount = 0;
+    let onFailureCalled = false;
+    let caughtError: unknown;
+
+    const p = executeWithRetryAndSignal(
+      async () => {
+        fnCallCount++;
+        throw realError;
+      },
+      controller.signal,
+      {
+        maxAttempts: 5,
+        initialDelay: 50,
+        jitter: 'none',
+        backoff: 'constant',
+        deadline: Date.now() + 10,
+        onFailure: () => { onFailureCalled = true; },
+      },
+      'GET'
+    ).catch((e) => { caughtError = e; });
+
+    await flush();
+    await tick(10); // deadline expires after first attempt
+    await flush();
+    await p;
+
+    assert.strictEqual(fnCallCount, 1, 'exactly one attempt must have run (signal path)');
+    assert.ok(onFailureCalled, 'onFailure must have been called (delayExceedsDeadline path, signal)');
+
+    assert.ok(caughtError !== undefined, 'must throw');
+    assert.ok(
+      !(caughtError instanceof DOMException && (caughtError as DOMException).name === 'TimeoutError'),
+      'must NOT throw the ?? DOMException fallback when lastError is set (signal path)'
+    );
+    assert.strictEqual(
+      caughtError,
+      realError,
+      'must throw the exact real error object from the failed attempt (signal path)'
+    );
+
+    resetTimers();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #37 — AC-7: regression — future deadline works unchanged in both fns
+// ---------------------------------------------------------------------------
+
+describe('AC-7 (#37): regression — future absolute deadline works unchanged in both engine functions', () => {
+  it('executeWithRetry: future deadline — fn is called and request succeeds', async () => {
+    let fnCallCount = 0;
+
+    const result = await executeWithRetry(
+      async () => {
+        fnCallCount++;
+        return 'ok';
+      },
+      { deadline: Date.now() + 8000, maxAttempts: 1 },
+      'GET'
+    );
+
+    assert.strictEqual(result, 'ok', 'request must succeed');
+    assert.strictEqual(fnCallCount, 1, 'fn must be called once');
+  });
+
+  it('executeWithRetryAndSignal: future deadline — fn is called and request succeeds', async () => {
+    let fnCallCount = 0;
+    const controller = new AbortController();
+
+    const result = await executeWithRetryAndSignal(
+      async () => {
+        fnCallCount++;
+        return 'ok';
+      },
+      controller.signal,
+      { deadline: Date.now() + 8000, maxAttempts: 1 },
+      'GET'
+    );
+
+    assert.strictEqual(result, 'ok', 'request must succeed');
+    assert.strictEqual(fnCallCount, 1, 'fn must be called once');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #37 — Bug A: delayExceedsDeadline give-up path (between attempts)
+//
+// These tests verify the behaviour when:
+//   (a) at least one real attempt ran (lastError is set), AND
+//   (b) the computed inter-attempt sleep would overshoot the deadline.
+//
+// The engine should: call onFailure, break, then reach `throw lastError ??
+// new DOMException(...)` with lastError already set → throw the real error,
+// NOT the fallback DOMException.
+//
+// Mutation-kill targets:
+//   - mutant drops ?? fallback: `throw lastError` — safe here since lastError
+//     IS set, but the paired "no-attempt" tests above would catch it.
+//   - mutant removes onFailure call: onFailureCalled would stay false.
+//   - mutant skips break in delayExceedsDeadline: engine would try to sleep and
+//     fnCallCount would exceed 1 (fake-clock tick makes the sleep instant).
+// ---------------------------------------------------------------------------
+
+describe('Bug A (#37): delayExceedsDeadline give-up path — real lastError thrown via ?? operator', () => {
+  it('executeWithRetry: sleep would overshoot deadline → onFailure fires, real error propagates', async (t) => {
+    enableFakeTimers(t, { includeDate: true });
+
+    // First attempt fails immediately. Backoff sleep (100ms) > remaining deadline
+    // time (~5ms), so delayExceedsDeadline fires: break with lastError set.
+    const realError = makeError({ statusCode: 503, message: 'upstream unavailable' });
+    let onFailureCalled = false;
+    let fnCallCount = 0;
+    let caughtError: unknown;
+
+    const p = executeWithRetry(
+      async () => {
+        fnCallCount++;
+        throw realError;
+      },
+      {
+        maxAttempts: 5,
+        initialDelay: 100,
+        jitter: 'none',
+        backoff: 'constant',
+        // Deadline 5ms from now: first attempt fires immediately and fails,
+        // then sleep(100) would overshoot → delayExceedsDeadline → break.
+        deadline: Date.now() + 5,
+        onFailure: () => { onFailureCalled = true; },
+      },
+      'GET'
+    ).catch((e) => { caughtError = e; });
+
+    await flush();
+    await p;
+
+    // Engine should have attempted exactly once.
+    assert.strictEqual(fnCallCount, 1, 'fn must be called exactly once before give-up');
+    assert.ok(onFailureCalled, 'onFailure must be called on the give-up path');
+
+    // The thrown error must be the REAL error from the attempt.
+    assert.strictEqual(caughtError, realError,
+      'must propagate the real error from the failed attempt, not the ?? fallback DOMException');
+    assert.ok(
+      !(caughtError instanceof DOMException && (caughtError as DOMException).name === 'TimeoutError'),
+      'must NOT be the ?? TimeoutError fallback — lastError was set by the real attempt'
+    );
+
+    resetTimers();
+  });
+
+  it('executeWithRetryAndSignal: sleep would overshoot deadline → onFailure fires, real error propagates', async (t) => {
+    enableFakeTimers(t, { includeDate: true });
+
+    const realError = makeError({ statusCode: 429, message: 'rate limited' });
+    const controller = new AbortController();
+    let onFailureCalled = false;
+    let fnCallCount = 0;
+    let caughtError: unknown;
+
+    const p = executeWithRetryAndSignal(
+      async () => {
+        fnCallCount++;
+        throw realError;
+      },
+      controller.signal,
+      {
+        maxAttempts: 5,
+        initialDelay: 100,
+        jitter: 'none',
+        backoff: 'constant',
+        deadline: Date.now() + 5,
+        onFailure: () => { onFailureCalled = true; },
+      },
+      'GET'
+    ).catch((e) => { caughtError = e; });
+
+    await flush();
+    await p;
+
+    assert.strictEqual(fnCallCount, 1, 'fn must be called exactly once before give-up (signal path)');
+    assert.ok(onFailureCalled, 'onFailure must be called on the give-up path (signal path)');
+
+    assert.strictEqual(caughtError, realError,
+      'must propagate the real error, not the ?? fallback (signal path)');
+    assert.ok(
+      !(caughtError instanceof DOMException && (caughtError as DOMException).name === 'TimeoutError'),
+      'must NOT be the ?? TimeoutError fallback when lastError is set (signal path)'
+    );
+
+    resetTimers();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // AC-8: engine.ts does NOT import from errors/extractor.ts
 // ---------------------------------------------------------------------------
 
