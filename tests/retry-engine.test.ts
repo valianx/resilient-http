@@ -1468,6 +1468,441 @@ describe('Retry-After: native Headers object in e.response.headers', () => {
 });
 
 // ---------------------------------------------------------------------------
+// AC-6 (F4 targeted): shared-loop branch coverage
+//
+// These tests drive the branches inside runRetryLoop that were previously
+// duplicated between executeWithRetry and executeWithRetryAndSignal.
+// Using exact value assertions to maximise mutation-score impact.
+// ---------------------------------------------------------------------------
+
+describe('AC-6 (F4): Retry-After > maxRetryAfter → give up, no sleep, onFailure fires', () => {
+  it('gives up immediately with exact attempt count and onFailure args when Retry-After exceeds cap', async (t) => {
+    enableFakeTimers(t);
+    let calls = 0;
+    const retryCalls: number[] = [];
+    const failureArgs: Array<[unknown, number]> = [];
+    const rateLimitError = makeError({ statusCode: 429, retryAfterSeconds: 120 }); // 120s > 60s cap
+
+    const p = executeWithRetry(
+      async () => {
+        calls++;
+        throw rateLimitError;
+      },
+      {
+        maxAttempts: 5,
+        respectRetryAfter: true,
+        maxRetryAfter: 60_000,   // 60s cap
+        jitter: 'none',
+        retryableMethods: ['GET'],
+        onRetry: (_err, attempt, _delay) => { retryCalls.push(attempt); },
+        onFailure: (err, attempts) => { failureArgs.push([err, attempts]); },
+      },
+      'GET'
+    ).catch(() => { /* expected */ });
+
+    await flush();
+    await p;
+
+    // Exactly one attempt — Retry-After > maxRetryAfter means give up immediately.
+    assert.strictEqual(calls, 1, 'must not retry when Retry-After > maxRetryAfter');
+    // No sleep means no onRetry call.
+    assert.strictEqual(retryCalls.length, 0, 'onRetry must NOT be called (no sleep happened)');
+    // onFailure must fire exactly once with (error, 1).
+    assert.strictEqual(failureArgs.length, 1, 'onFailure must be called exactly once');
+    assert.strictEqual(failureArgs[0][0], rateLimitError, 'onFailure must receive the original error');
+    assert.strictEqual(failureArgs[0][1], 1, 'onFailure must report attempt count = 1');
+
+    resetTimers();
+  });
+
+  it('Retry-After exceeds cap on signal path — same give-up behavior', async (t) => {
+    enableFakeTimers(t);
+    let calls = 0;
+    const retryCalls: number[] = [];
+    const failureArgs: Array<[unknown, number]> = [];
+    const controller = new AbortController();
+    const rateLimitError = makeError({ statusCode: 429, retryAfterSeconds: 300 }); // 300s >> cap
+
+    const p = executeWithRetryAndSignal(
+      async () => {
+        calls++;
+        throw rateLimitError;
+      },
+      controller.signal,
+      {
+        maxAttempts: 5,
+        respectRetryAfter: true,
+        maxRetryAfter: 60_000,
+        jitter: 'none',
+        retryableMethods: ['GET'],
+        onRetry: (_err, attempt, _delay) => { retryCalls.push(attempt); },
+        onFailure: (err, attempts) => { failureArgs.push([err, attempts]); },
+      },
+      'GET'
+    ).catch(() => { /* expected */ });
+
+    await flush();
+    await p;
+
+    assert.strictEqual(calls, 1, 'signal path: must not retry when Retry-After > maxRetryAfter');
+    assert.strictEqual(retryCalls.length, 0, 'signal path: onRetry must NOT be called');
+    assert.strictEqual(failureArgs.length, 1, 'signal path: onFailure must be called exactly once');
+    assert.strictEqual(failureArgs[0][0], rateLimitError, 'signal path: onFailure must receive original error');
+    assert.strictEqual(failureArgs[0][1], 1, 'signal path: onFailure must report attempt count = 1');
+
+    resetTimers();
+  });
+});
+
+describe('AC-6 (F4): delayExceedsDeadline → break before sleeping, onRetry never called', () => {
+  it('executeWithRetry: give-up path when backoff delay overshoots deadline', async (t) => {
+    enableFakeTimers(t, { includeDate: true });
+    let calls = 0;
+    const retryCalls: number[] = [];
+    const failureArgs: Array<[unknown, number]> = [];
+    const giveUpError = makeError({ statusCode: 503, message: 'svc unavailable' });
+
+    // initialDelay:200, constant backoff, jitter:none → delay = 200ms per attempt.
+    // Deadline is only 10ms away → first attempt fires, then 200ms sleep would
+    // overshoot the deadline → delayExceedsDeadline → break without sleeping.
+    const p = executeWithRetry(
+      async () => {
+        calls++;
+        throw giveUpError;
+      },
+      {
+        maxAttempts: 5,
+        initialDelay: 200,
+        backoff: 'constant',
+        jitter: 'none',
+        deadline: Date.now() + 10,
+        retryableMethods: ['GET'],
+        onRetry: (_err, attempt, _delay) => { retryCalls.push(attempt); },
+        onFailure: (err, attempts) => { failureArgs.push([err, attempts]); },
+      },
+      'GET'
+    ).catch(() => { /* expected */ });
+
+    await flush();
+    await p;
+
+    // Exactly one call — deadline guard fires before any sleep.
+    assert.strictEqual(calls, 1, 'must attempt exactly once before deadline give-up');
+    // delayExceedsDeadline breaks BEFORE onRetry, so onRetry must not be called.
+    assert.strictEqual(retryCalls.length, 0, 'onRetry must NOT be called when delayExceedsDeadline fires');
+    // onFailure must be called with the real error and attempt = 1.
+    assert.strictEqual(failureArgs.length, 1, 'onFailure must be called exactly once');
+    assert.strictEqual(failureArgs[0][0], giveUpError, 'onFailure must receive the real error');
+    assert.strictEqual(failureArgs[0][1], 1, 'onFailure must report attempt count = 1');
+
+    resetTimers();
+  });
+
+  it('executeWithRetryAndSignal: give-up path when backoff delay overshoots deadline', async (t) => {
+    enableFakeTimers(t, { includeDate: true });
+    let calls = 0;
+    const retryCalls: number[] = [];
+    const failureArgs: Array<[unknown, number]> = [];
+    const controller = new AbortController();
+    const giveUpError = makeError({ statusCode: 503, message: 'svc unavailable signal path' });
+
+    const p = executeWithRetryAndSignal(
+      async () => {
+        calls++;
+        throw giveUpError;
+      },
+      controller.signal,
+      {
+        maxAttempts: 5,
+        initialDelay: 200,
+        backoff: 'constant',
+        jitter: 'none',
+        deadline: Date.now() + 10,
+        retryableMethods: ['GET'],
+        onRetry: (_err, attempt, _delay) => { retryCalls.push(attempt); },
+        onFailure: (err, attempts) => { failureArgs.push([err, attempts]); },
+      },
+      'GET'
+    ).catch(() => { /* expected */ });
+
+    await flush();
+    await p;
+
+    assert.strictEqual(calls, 1, 'signal path: must attempt exactly once before deadline give-up');
+    assert.strictEqual(retryCalls.length, 0, 'signal path: onRetry must NOT be called when delayExceedsDeadline fires');
+    assert.strictEqual(failureArgs.length, 1, 'signal path: onFailure must be called exactly once');
+    assert.strictEqual(failureArgs[0][0], giveUpError, 'signal path: onFailure must receive the real error');
+    assert.strictEqual(failureArgs[0][1], 1, 'signal path: onFailure must report attempt count = 1');
+
+    resetTimers();
+  });
+});
+
+describe('AC-6 (F4): decorrelated-jitter previousDelay feeds forward across attempts', () => {
+  // Decorrelated formula: delay_n = random(initialDelay, previousDelay_n * 3)
+  // where previousDelay_n was set from delay_{n-1}.
+  //
+  // Mutation-kill target: a mutant that resets previousDelay to initialDelay on
+  // every iteration (instead of feeding delay forward) would cause delay[1]'s
+  // upper bound to be initialDelay * 3 instead of delay[0] * 3.
+  // With initialDelay:100, maxDelay:200000, and 3 retries, we capture all three
+  // onRetry delays and verify each successive one's bound.
+  it('each successive delay respects the decorrelated formula with fed-forward previousDelay', async (t) => {
+    enableFakeTimers(t);
+    const capturedDelays: number[] = [];
+    let calls = 0;
+
+    const INITIAL_DELAY = 100;
+    const MAX_DELAY = 200_000; // high cap so the formula range is clearly observable
+
+    const p = executeWithRetry(
+      async () => {
+        calls++;
+        throw makeError({ statusCode: 503 });
+      },
+      {
+        maxAttempts: 4,
+        backoff: 'exponential',
+        jitter: 'decorrelated',
+        initialDelay: INITIAL_DELAY,
+        maxDelay: MAX_DELAY,
+        retryableMethods: ['GET'],
+        onRetry: (_err, _attempt, delay) => { capturedDelays.push(delay); },
+      },
+      'GET'
+    ).catch(() => { /* expected exhaustion */ });
+
+    // Advance through 3 inter-attempt sleeps. Each may be up to MAX_DELAY ms;
+    // tick far enough (4 × MAX_DELAY) to drain all sleeps with fake timers.
+    for (let i = 0; i < 4; i++) {
+      await flush();
+      await tick(MAX_DELAY);
+      await flush();
+    }
+    await p;
+
+    assert.strictEqual(calls, 4, 'all 4 attempts must have run');
+    assert.strictEqual(capturedDelays.length, 3, 'onRetry must be called 3 times (once per inter-attempt sleep)');
+
+    // Invariant 1: every delay is >= initialDelay (lower bound of decorrelated formula).
+    for (let i = 0; i < capturedDelays.length; i++) {
+      assert.ok(
+        capturedDelays[i] >= INITIAL_DELAY,
+        `delay[${i}]=${capturedDelays[i]} must be >= initialDelay (${INITIAL_DELAY})`
+      );
+    }
+
+    // Invariant 2: each delay is <= previousDelay * 3 (upper bound of the formula).
+    // delay[0] uses previousDelay = initialDelay (engine sets previousDelay = initialDelay at start).
+    // delay[1] uses previousDelay = delay[0] (engine updates previousDelay = delay after each call).
+    // delay[2] uses previousDelay = delay[1].
+    const previousDelays = [INITIAL_DELAY, capturedDelays[0], capturedDelays[1]];
+    for (let i = 0; i < capturedDelays.length; i++) {
+      assert.ok(
+        capturedDelays[i] <= previousDelays[i] * 3,
+        `delay[${i}]=${capturedDelays[i]} must be <= previousDelay[${i}] (${previousDelays[i]}) * 3 = ${previousDelays[i] * 3} — previousDelay must have been fed forward`
+      );
+    }
+
+    resetTimers();
+  });
+});
+
+describe('AC-6 (F4): caller-abort during sleepWithAbort → AbortError, no further retry', () => {
+  it('aborting during inter-attempt sleep rejects with AbortError and performs no additional attempt', async (t) => {
+    enableFakeTimers(t);
+    const controller = new AbortController();
+    let calls = 0;
+    const retryCalls: number[] = [];
+
+    // First attempt fails; would sleep 5000ms before the second attempt.
+    const p = executeWithRetryAndSignal(
+      async () => {
+        calls++;
+        throw makeError({ statusCode: 503 });
+      },
+      controller.signal,
+      {
+        maxAttempts: 5,
+        initialDelay: 5000,
+        backoff: 'constant',
+        jitter: 'none',
+        retryableMethods: ['GET'],
+        onRetry: (_err, attempt, _delay) => { retryCalls.push(attempt); },
+      },
+      'GET'
+    );
+
+    // Let the first attempt execute and reach sleepWithAbort(5000, callerSignal).
+    await flush();
+    await tick(0); // attempt fires, throws, onRetry queues the sleep
+    await flush();
+
+    // Caller aborts while the inter-attempt sleep is in progress.
+    controller.abort();
+    await flush();
+
+    await assert.rejects(p, (err: unknown) => {
+      assert.ok(err instanceof DOMException, 'rejection must be a DOMException');
+      assert.strictEqual(err.name, 'AbortError', 'rejection must be an AbortError');
+      return true;
+    });
+
+    // The engine must have made exactly 1 call — the abort fired during the sleep,
+    // before the second attempt could start.
+    assert.strictEqual(calls, 1, 'must not start a second attempt after abort during sleep');
+    // onRetry fires BEFORE the sleep, so it should have been called exactly once.
+    assert.strictEqual(retryCalls.length, 1, 'onRetry called once (before sleep), then abort fires');
+    assert.strictEqual(retryCalls[0], 1, 'onRetry must report attempt = 1');
+
+    resetTimers();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AC-7 (F10): 429 Retry-After: 0 and past HTTP-date → delay = 0, no backoff
+//
+// Regression test that locks in the F10 behavior: a 429 response carrying
+// Retry-After: 0 (or a past HTTP-date whose delta resolves to ≤ 0 ms) must
+// retry immediately with delay = 0, not with the normal backoff schedule.
+// ---------------------------------------------------------------------------
+
+describe('AC-7 (F10 regression): 429 Retry-After: 0 → immediate retry with delay = 0', () => {
+  it('Retry-After: 0 on a 429 → retries immediately with delay exactly 0', async (t) => {
+    enableFakeTimers(t);
+    let calls = 0;
+    const capturedDelays: number[] = [];
+
+    // Use a large initialDelay to ensure the engine does NOT fall back to backoff.
+    // If it used backoff, delay would be 5000ms; with Retry-After: 0 it must be 0.
+    const p = executeWithRetry(
+      async () => {
+        calls++;
+        throw makeError({ statusCode: 429, retryAfterSeconds: 0 });
+      },
+      {
+        maxAttempts: 3,
+        respectRetryAfter: true,
+        maxRetryAfter: 60_000,
+        initialDelay: 5000,
+        backoff: 'constant',
+        jitter: 'none',
+        retryableMethods: ['GET'],
+        onRetry: (_err, _attempt, delay) => { capturedDelays.push(delay); },
+      },
+      'GET'
+    ).catch(() => { /* exhaustion */ });
+
+    await flush();
+    // delay is 0 — tick(0) is enough to drain each inter-attempt sleep.
+    await tick(0);
+    await flush();
+    await tick(0);
+    await flush();
+    await p;
+
+    assert.strictEqual(calls, 3, '3 attempts must complete (2 retries after the initial)');
+    assert.strictEqual(capturedDelays.length, 2, 'onRetry must be called twice');
+    // Both delays must be exactly 0 — Retry-After: 0 overrides any backoff.
+    assert.strictEqual(capturedDelays[0], 0, 'first retry delay must be exactly 0 (Retry-After: 0)');
+    assert.strictEqual(capturedDelays[1], 0, 'second retry delay must be exactly 0 (Retry-After: 0)');
+
+    resetTimers();
+  });
+
+  it('Retry-After: past HTTP-date on 429 → retries immediately with delay = 0', async (t) => {
+    enableFakeTimers(t);
+    let calls = 0;
+    const capturedDelays: number[] = [];
+
+    // Build a past HTTP-date: parseRetryAfterMs will compute max(0, pastDate - Date.now()) = 0.
+    const pastDate = new Date(Date.now() - 10_000).toUTCString();
+
+    function makePastDateError(): Error & Record<string, unknown> {
+      const err = new Error('rate limited') as Error & Record<string, unknown>;
+      err['response'] = {
+        status: 429,
+        headers: { 'retry-after': pastDate },
+      };
+      return err;
+    }
+
+    const p = executeWithRetry(
+      async () => {
+        calls++;
+        throw makePastDateError();
+      },
+      {
+        maxAttempts: 3,
+        respectRetryAfter: true,
+        maxRetryAfter: 60_000,
+        initialDelay: 5000,
+        backoff: 'constant',
+        jitter: 'none',
+        retryableMethods: ['GET'],
+        onRetry: (_err, _attempt, delay) => { capturedDelays.push(delay); },
+      },
+      'GET'
+    ).catch(() => { /* exhaustion */ });
+
+    await flush();
+    await tick(0);
+    await flush();
+    await tick(0);
+    await flush();
+    await p;
+
+    assert.strictEqual(calls, 3, '3 attempts must complete for past HTTP-date Retry-After');
+    assert.strictEqual(capturedDelays.length, 2, 'onRetry must be called twice');
+    // Past HTTP-date resolves to delay 0 via Math.max(0, pastDate - Date.now()).
+    assert.strictEqual(capturedDelays[0], 0, 'first retry delay must be exactly 0 (past HTTP-date)');
+    assert.strictEqual(capturedDelays[1], 0, 'second retry delay must be exactly 0 (past HTTP-date)');
+
+    resetTimers();
+  });
+
+  it('Retry-After: 0 on 429 via signal path → delay = 0, classification must be rate-limit', async (t) => {
+    enableFakeTimers(t);
+    let calls = 0;
+    const capturedDelays: number[] = [];
+    const controller = new AbortController();
+
+    const p = executeWithRetryAndSignal(
+      async () => {
+        calls++;
+        throw makeError({ statusCode: 429, retryAfterSeconds: 0 });
+      },
+      controller.signal,
+      {
+        maxAttempts: 3,
+        respectRetryAfter: true,
+        maxRetryAfter: 60_000,
+        initialDelay: 5000,
+        backoff: 'constant',
+        jitter: 'none',
+        retryableMethods: ['GET'],
+        onRetry: (_err, _attempt, delay) => { capturedDelays.push(delay); },
+      },
+      'GET'
+    ).catch(() => { /* exhaustion */ });
+
+    await flush();
+    await tick(0);
+    await flush();
+    await tick(0);
+    await flush();
+    await p;
+
+    assert.strictEqual(calls, 3, 'signal path: 3 attempts must complete');
+    assert.strictEqual(capturedDelays.length, 2, 'signal path: onRetry called twice');
+    assert.strictEqual(capturedDelays[0], 0, 'signal path: first retry delay must be exactly 0');
+    assert.strictEqual(capturedDelays[1], 0, 'signal path: second retry delay must be exactly 0');
+
+    resetTimers();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // SEC-001: no-method fail-safe (double-charge prevention)
 // ---------------------------------------------------------------------------
 
