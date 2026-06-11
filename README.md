@@ -8,7 +8,7 @@ Works with **Node.js 22+**, **Bun 1.0+**, and browsers. Ships dual **ESM + Commo
 - **Single factory**: `createResilientHttp()` — one entry point, config-only surface
 - **Retry with Backoff**: Exponential, linear, and constant backoff strategies
 - **Jitter Algorithms**: Full, equal, decorrelated, and none (prevents thundering herd)
-- **Safe Errors**: `ResilientHttpError` with three kinds, safe-by-default `toJSON()`, and a global brand that survives duplicate module installs
+- **Safe Errors**: `ResilientHttpError` with three kinds, a structured `toJSON()` (full error; sensitive headers redacted + message capped), and a global brand that survives duplicate module installs
 - **Hook System**: `onRequest / onResponse / onRetry / onFailure` interceptors
 - **Idempotency Keys**: Frozen per logical operation — all retry attempts reuse the same key
 - **Zero Dependencies**: No external runtime dependencies
@@ -65,7 +65,7 @@ try {
       console.error(err.message);
     }
 
-    // Log-safe representation: body, cause, and meta are excluded
+    // toJSON() exposes the full error (headers redacted, message capped) — sanitize before sending to a client
     myLogger.error('request failed', err.toJSON());
   }
 }
@@ -74,9 +74,10 @@ try {
 Use `isResilientHttpError(e)` — not `instanceof` — so the check works correctly even
 when multiple copies of the package are installed (monorepos, version conflicts).
 
-`toJSON()` is safe by default: it never includes `body`, `cause`, or `meta`, preventing
-secrets or large payloads from leaking into logs. See the full error reference and the
-BFF sanitization pattern in [docs/configuration.md](./docs/configuration.md#error-handling--resilienthttperror).
+`toJSON()` returns the full structured error (`cause`, `body`, and `meta` included) for
+diagnosis; it redacts sensitive headers and caps the message, but is **not** a redaction
+boundary — sanitize before forwarding to an untrusted client. See the full error reference
+and the BFF sanitization pattern in [docs/configuration.md](./docs/configuration.md#error-handling--resilienthttperror).
 
 ---
 
@@ -107,7 +108,7 @@ Each file demonstrates one tool or feature in isolation.
 | [`10-response-types.ts`](./docs/use-cases/10-response-types.ts) | `responseType` modes: auto / json / text / arrayBuffer / blob / stream / none |
 | [`11-validate-status.ts`](./docs/use-cases/11-validate-status.ts) | Custom `validateStatus` — treat 4xx as success, or restrict 2xx range |
 | [`12-errors.ts`](./docs/use-cases/12-errors.ts) | Three error kinds, `ErrorClassification`, `isResilientHttpError`, `toJSON` |
-| [`13-redaction.ts`](./docs/use-cases/13-redaction.ts) | `redactHeaders`, `redactQueryParams`, BFF-safe `toJSON` output |
+| [`13-redaction.ts`](./docs/use-cases/13-redaction.ts) | `redactHeaders`, `redactQueryParams`, sanitizing errors for an untrusted client |
 | [`14-hooks.ts`](./docs/use-cases/14-hooks.ts) | `onRequest` (mutator), `onResponse`, `onRetry`, `onFailure` observers |
 | [`15-idempotency-key.ts`](./docs/use-cases/15-idempotency-key.ts) | `true` / static string / factory function frozen across retries |
 | [`16-headers-and-logger.ts`](./docs/use-cases/16-headers-and-logger.ts) | Instance + per-request header merge, `Logger` interface |

@@ -14,7 +14,7 @@ Complete reference for every option accepted by `resilient-http`.
 - [Error handling — `ResilientHttpError`](#error-handling--resilienthttperror)
   - [`ResilientHttpError` properties](#resilienthttperror-properties)
   - [`isResilientHttpError(e)`](#isresilienthttperrore)
-  - [`toJSON()` — safe by default](#tojson--safe-by-default)
+  - [`toJSON()` — full error, headers redacted](#tojson--full-error-headers-redacted)
   - [BFF / server-side pattern](#bff--server-side-pattern)
 - [Redaction denylist](#redaction-denylist)
 
@@ -220,7 +220,9 @@ try {
       console.error(err.message);
     }
 
-    // Log-safe representation: body, cause, and meta are excluded
+    // toJSON() exposes the full structured error (cause/body/meta) for diagnosis;
+    // sensitive headers are redacted and the message is capped. Sanitize before
+    // sending to an untrusted client (see "BFF / server-side pattern" below).
     const logPayload = err.toJSON();
     myLogger.error('request failed', logPayload);
   } else {
@@ -244,11 +246,11 @@ See [12-errors.ts](./use-cases/12-errors.ts) for the full walkthrough.
 | `method` | `string \| undefined` | HTTP method. |
 | `url` | `string \| undefined` | Request URL — raw, not redacted (see `toJSON()` for the redacted version). |
 | `headers` | `Record<string, string> \| undefined` | Response headers (`kind: 'response'` only). |
-| `body` | `unknown` | Raw response body. Present on the instance; **excluded from `toJSON()`**. |
+| `body` | `unknown` | Raw response body. Present on the instance and **included in `toJSON()`** (v2.2+). |
 | `code` | `string \| undefined` | Network error code (`kind: 'network'` only). |
 | `requestId` | `string \| undefined` | Stable ID for the logical operation. |
 | `attemptId` | `string \| undefined` | ID for the specific attempt that failed. |
-| `meta` | `Record<string, unknown> \| undefined` | Arbitrary metadata from hooks. Excluded from `toJSON()`. |
+| `meta` | `Record<string, unknown> \| undefined` | Arbitrary metadata from hooks. **Included in `toJSON()`** (v2.2+). |
 
 ### `isResilientHttpError(e)`
 
@@ -257,26 +259,32 @@ The guard uses `Symbol.for('resilient-http.error')` — a global-registry symbol
 works correctly even when multiple copies of the package are installed (monorepos, version
 conflicts). `instanceof` breaks in those scenarios.
 
-### `toJSON()` — safe by default
+### `toJSON()` — full error, headers redacted
 
-`toJSON()` is intentionally conservative: it never includes `body`, `cause`, or `meta`.
-This prevents secrets, PII, or large response payloads from leaking into logs or
-server-to-client responses.
+`toJSON()` returns the **full structured error** — including `cause` (serialized),
+`body`, and `meta` — so failures are diagnosable. It is **not** a redaction boundary:
+the library cannot know which fields are sensitive in your app, so it exposes the data
+and lets you decide what to redact. The two controls it *does* own are applied
+automatically:
+
+- **Sensitive headers** are replaced with `[REDACTED]` (built-in denylist + your
+  `redactHeaders`).
+- **`message`** is capped at 512 characters, so a large body cannot leak via the summary.
 
 ```typescript
-// Safe to pass directly to your logging infrastructure
+// Safe for server-side logging: headers redacted, message capped
 logger.error('request failed', err.toJSON());
 ```
 
-The `url` field in `toJSON()` is redacted when `redactQueryParams` is configured at the
-instance level. The built-in denylist covers headers; URL query params are opt-in.
+The `url` field is redacted when `redactQueryParams` is configured. **Do not forward
+`toJSON()` verbatim to an untrusted client** — build a sanitized projection (see below).
 
 ### BFF / server-side pattern
 
-`err.message` is derived from the server response body. A misbehaving upstream may embed
-sensitive content in the body that the library picks up. When forwarding error details to
-an untrusted client (browser, mobile app), always replace the message — never forward
-`err.message` as-is:
+`err.message` is derived from the server response body, and `toJSON()` now includes
+`body`, `cause`, and `meta`. A misbehaving upstream may embed sensitive content. When
+returning error details to an untrusted client (browser, mobile app), **never forward
+`err.message` or `err.toJSON()` verbatim** — build a controlled projection:
 
 ```typescript
 // Example: Next.js App Router route handler
@@ -288,7 +296,7 @@ export async function POST(req: Request) {
     return Response.json(result.data);
   } catch (err) {
     if (isResilientHttpError(err)) {
-      // Full context logged internally (body/cause omitted by toJSON() automatically)
+      // Full context logged internally — toJSON() includes body/cause/meta, so keep it server-side
       logger.error('request failed', err.toJSON());
 
       // Return a controlled message to the browser

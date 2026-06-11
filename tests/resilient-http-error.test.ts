@@ -1,15 +1,32 @@
 /**
- * Tests for ResilientHttpError v2 — covers all acceptance criteria of Phase 4.
+ * Tests for ResilientHttpError v2 — covers all acceptance criteria of Phase 4
+ * plus the new network-diagnosability and toJSON() transparency ACs from #36.
  *
  * AC-1:  construct response / network / setup kinds
- * AC-2:  toJSON() includes safe fields; excludes body / cause / meta
+ * AC-2:  toJSON() includes safe fields AND body / cause / meta (v2.2+ contract)
  * AC-3:  header redaction is case-insensitive for all denylist entries
  * AC-3b: query-param redaction preserves non-sensitive params; url instance stays raw
  * AC-4:  isResilientHttpError brand check; works across module boundaries (Symbol.for)
  * AC-5:  non-JSON / unreadable body → no secondary error; fallback to statusText
  * AC-6:  body exceeding maxBodySize is truncated and marked
- * AC-7:  anti-leak scan — secret literal absent from every byte of JSON.stringify(toJSON())
+ * AC-7:  anti-leak scan — redacted-header values and beyond-message-cap content
+ *        never appear in JSON.stringify(toJSON()); body/cause/meta ARE present now
  * AC-10: fail-safe URL — relative / malformed URL with redactQueryParams hides query
+ *
+ * Network diagnosability (#36):
+ * AC-N1..AC-N6: cause-chain code resolution (undici shape, cycles, depth cap)
+ *
+ * New network ACs (AggregateError + errno):
+ * AC-AGG1: AggregateError nested at cause.cause → errors[0].code resolved
+ * AC-AGG2: AggregateError multiple errors → picks first recognizable code
+ * AC-AGG3: errno-only node → code resolved from errno
+ * AC-AGG4: over-depth chain → terminates with no resolution
+ * AC-AGG5: cross-edge cycle → terminates
+ * AC-AGG6: undefined cause → omitted from toJSON(), message stays 'Network error'
+ *
+ * Serializer robustness:
+ * AC-SER1: serializeCause fail-safe on getter-throws / null-proto / BigInt / circular
+ * AC-SER2: toJSON() exposes cause (code/address/port), body, meta
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
@@ -198,10 +215,10 @@ describe('ResilientHttpError — AC-1 construction', () => {
 });
 
 // ============================================================================
-// AC-2 — toJSON() field inclusion and exclusion
+// AC-2 — toJSON() field inclusion (v2.2+ contract: body/cause/meta NOW included)
 // ============================================================================
 
-describe('ResilientHttpError — AC-2 toJSON() safe-by-default', () => {
+describe('ResilientHttpError — AC-2 toJSON() field inclusion', () => {
   it('toJSON() includes all safe fields for kind:response', () => {
     const err = new ResilientHttpError({
       kind: 'response',
@@ -232,28 +249,44 @@ describe('ResilientHttpError — AC-2 toJSON() safe-by-default', () => {
     assert.ok(json['headers'] !== undefined, 'headers should be present');
   });
 
-  it('toJSON() does NOT include body', () => {
+  it('toJSON() INCLUDES body (v2.2+ contract)', () => {
+    // Previous contract excluded body; v2.2 exposes it so the consumer has
+    // full context. The consumer owns any additional redaction.
     const err = new ResilientHttpError({
       kind: 'response',
       statusCode: 500,
-      body: { secret: 'should-not-appear' },
+      body: { orderRef: 'ORD-1', message: 'x' },
+      meta: { region: 'eu' },
     });
 
     const json = err.toJSON();
-    assert.ok(!('body' in json), 'body must not appear in toJSON()');
+    assert.ok('body' in json, 'body must appear in toJSON()');
+    assert.deepStrictEqual(json['body'], { orderRef: 'ORD-1', message: 'x' });
   });
 
-  it('toJSON() does NOT include cause', () => {
+  it('toJSON() INCLUDES cause as a serialized object (v2.2+ contract)', () => {
+    // Previous contract excluded cause; v2.2 serializes it so code/address/port
+    // are visible to the consumer.
+    const inner = Object.assign(new Error('connect ECONNREFUSED 10.0.0.1:443'), {
+      code: 'ECONNREFUSED',
+      address: '10.0.0.1',
+      port: 443,
+    });
     const err = new ResilientHttpError({
       kind: 'network',
-      cause: new Error('original cause'),
+      cause: inner,
     });
 
     const json = err.toJSON();
-    assert.ok(!('cause' in json), 'cause must not appear in toJSON()');
+    assert.ok('cause' in json, 'cause must appear in toJSON()');
+    const c = json['cause'] as Record<string, unknown>;
+    assert.strictEqual(c['code'], 'ECONNREFUSED');
+    assert.strictEqual(c['address'], '10.0.0.1');
+    assert.strictEqual(c['port'], 443);
   });
 
-  it('toJSON() does NOT include meta', () => {
+  it('toJSON() INCLUDES meta (v2.2+ contract)', () => {
+    // Previous contract excluded meta; v2.2 exposes it.
     const err = new ResilientHttpError({
       kind: 'setup',
       message: 'Bad config',
@@ -261,7 +294,8 @@ describe('ResilientHttpError — AC-2 toJSON() safe-by-default', () => {
     });
 
     const json = err.toJSON();
-    assert.ok(!('meta' in json), 'meta must not appear in toJSON()');
+    assert.ok('meta' in json, 'meta must appear in toJSON()');
+    assert.deepStrictEqual(json['meta'], { internalFlag: true });
   });
 
   it('toJSON() omits undefined optional fields (no explicit undefined values)', () => {
@@ -279,18 +313,25 @@ describe('ResilientHttpError — AC-2 toJSON() safe-by-default', () => {
     assert.ok(!('requestId' in json));
     assert.ok(!('attemptId' in json));
     assert.ok(!('headers' in json));
+    // body/meta/cause are undefined here so they must also be absent
+    assert.ok(!('body' in json));
+    assert.ok(!('meta' in json));
+    assert.ok(!('cause' in json));
   });
 
-  it('body content does not appear via any indirect path in toJSON() output', () => {
-    const secretBody = { password: 'p@ssw0rd-secret' };
+  it('body is present in toJSON() and its content is accessible (not hidden)', () => {
+    // v2.2 contract: body IS present; the consumer must not rely on body being absent.
+    // This replaces the old "body content does not appear via any indirect path" test.
+    // The remaining security invariant is header redaction + message cap (not body hiding).
     const err = new ResilientHttpError({
       kind: 'response',
       statusCode: 500,
-      body: secretBody,
+      body: { orderRef: 'ORD-42' },
     });
 
     const serialised = JSON.stringify(err.toJSON());
-    assertNoLeak(serialised, 'p@ssw0rd-secret', 'toJSON() body indirect leak');
+    // body is intentionally present in v2.2
+    assert.ok(serialised.includes('ORD-42'), 'body content should be present in toJSON() output');
   });
 });
 
@@ -624,14 +665,21 @@ describe('ResilientHttpError — AC-6 maxBodySize truncation', () => {
 });
 
 // ============================================================================
-// AC-7 — anti-leak: secret must not appear ANYWHERE in JSON.stringify(toJSON())
+// AC-7 — anti-leak scan (v2.2+ contract)
+//
+// body, cause, and meta ARE present in toJSON() by design.
+// The invariants that MUST hold:
+//   (a) Redacted-header values never appear in JSON.stringify(toJSON())
+//   (b) Content beyond the message cap never appears in toJSON().message
 // ============================================================================
 
-describe('ResilientHttpError — AC-7 anti-leak scan', () => {
-  const headerSecret = 'Bearer sk-prod-12345-SUPERSECRET-header';
+describe('ResilientHttpError — AC-7 anti-leak scan (retained security controls)', () => {
+  const headerSecret = 'Bearer SUPERSECRET-header-value-12345';
   const querySecret = 'querySecretValue9999';
 
   it('secret in redacted header does not appear anywhere in serialised toJSON()', () => {
+    // This is the retained invariant: header values in the denylist never leak.
+    // body/cause/meta are intentionally present (v2.2 contract).
     const err = new ResilientHttpError({
       kind: 'response',
       statusCode: 200,
@@ -649,40 +697,57 @@ describe('ResilientHttpError — AC-7 anti-leak scan', () => {
     assertNoLeak(serialised, querySecret, 'AC-7 query secret');
   });
 
-  it('secret in body does not appear in serialised toJSON()', () => {
-    const bodySecret = 'card-number-4111111111111111';
+  it('body IS present in toJSON() (v2.2 contract); redacted-header secrets still never appear', () => {
+    // v2.2: body is intentionally exposed. The invariant is that the HEADER
+    // secret (not the body content) stays redacted.
+    const bodyContent = 'card-number-4111111111111111';
+    const headerSecretLocal = 'Bearer header-secret-retained-value';
     const err = new ResilientHttpError({
       kind: 'response',
       statusCode: 400,
-      body: { card: bodySecret, cvv: '123' },
+      body: { card: bodyContent, cvv: '123' },
       contentType: 'application/json',
+      headers: { authorization: headerSecretLocal },
     });
 
     const serialised = JSON.stringify(err.toJSON());
-    assertNoLeak(serialised, bodySecret, 'AC-7 body secret');
+
+    // body is present now — consumer owns any further redaction
+    assert.ok(serialised.includes(bodyContent), 'body content should be present in v2.2 toJSON()');
+    // header secret is still redacted
+    assertNoLeak(serialised, headerSecretLocal, 'AC-7 header secret must still be redacted');
   });
 
-  it('cause error message does not appear in serialised toJSON()', () => {
-    const causeSecret = 'db-password-from-connection-string';
+  it('cause IS present in toJSON() (v2.2 contract); redacted-header secrets still never appear', () => {
+    // v2.2: cause is serialized and intentionally exposed. The invariant is that
+    // HEADER secrets (not cause content) remain redacted.
+    const causeMessage = 'ECONNREFUSED: connect to service';
+    const headerSecretLocal = 'Bearer header-secret-cause-test-value';
     const err = new ResilientHttpError({
-      kind: 'network',
-      cause: new Error(`ECONNREFUSED: connect to db with ${causeSecret}`),
+      kind: 'response',
+      statusCode: 500,
+      headers: { authorization: headerSecretLocal },
+      cause: new Error(causeMessage),
     });
 
     const serialised = JSON.stringify(err.toJSON());
-    assertNoLeak(serialised, causeSecret, 'AC-7 cause message secret');
+    // cause is present
+    assert.ok('cause' in err.toJSON(), 'cause must be present when set');
+    assertNoLeak(serialised, headerSecretLocal, 'AC-7 header secret alongside serialized cause');
   });
 
-  it('meta does not appear in serialised toJSON()', () => {
-    const metaSecret = 'internal-service-key-aaaabbbbcccc';
+  it('meta IS present in toJSON() (v2.2 contract)', () => {
+    // v2.2: meta is intentionally exposed.
+    const metaValue = 'internal-region-label';
     const err = new ResilientHttpError({
       kind: 'setup',
       message: 'Config error',
-      meta: { serviceKey: metaSecret },
+      meta: { region: metaValue },
     });
 
-    const serialised = JSON.stringify(err.toJSON());
-    assertNoLeak(serialised, metaSecret, 'AC-7 meta secret');
+    const json = err.toJSON();
+    assert.ok('meta' in json, 'meta must be present in v2.2 toJSON()');
+    assert.deepStrictEqual(json['meta'], { region: metaValue });
   });
 });
 
@@ -695,7 +760,7 @@ describe('ResilientHttpError — SEC-001 message capping (anti-body-leak via mes
   const TRUNCATED_MARKER = '[TRUNCATED]';
 
   it('kind:response with large string body caps message to ≤512+marker chars', () => {
-    const secret = 'sk_live_SECRETO123';
+    const secret = 'live-api-credential-SECRETO123';
     const largeBody = secret + 'x'.repeat(5000);
     const err = new ResilientHttpError({
       kind: 'response',
@@ -718,15 +783,9 @@ describe('ResilientHttpError — SEC-001 message capping (anti-body-leak via mes
       `Expected truncation marker in message: "${err.message.slice(-20)}"`
     );
 
-    // The full body must not appear in the serialised toJSON() output
-    assert.ok(
-      !serialised.includes(largeBody),
-      'Full large body must not appear in toJSON() serialisation'
-    );
-
-    // The secret (positioned past the cap) must not appear in the serialised output
-    // Note: the secret is at position 0 so it MAY appear in the first 512 chars,
-    // but the body beyond the cap must not appear.
+    // In v2.2, body IS exposed in toJSON() — the full body may appear there.
+    // The invariant is that the MESSAGE field is capped, not that body is hidden.
+    // Verify the message cap has been applied correctly.
     const expectedMaxLen = MAX_MESSAGE_SIZE + TRUNCATED_MARKER.length;
     assert.ok(
       serialised.includes(err.message),
@@ -738,10 +797,12 @@ describe('ResilientHttpError — SEC-001 message capping (anti-body-leak via mes
     );
   });
 
-  it('SEC-001 regression: secret beyond the 512-char cap does not appear in toJSON()', () => {
-    // Place the secret AFTER position 512 so it must be cut off
+  it('SEC-001 regression: secret beyond the 512-char cap does not appear in toJSON().message', () => {
+    // Place the secret AFTER position 512 so it must be cut off in the message.
+    // Note: in v2.2, body IS present in toJSON(), so the secret may appear there
+    // (consumer owns body redaction). The invariant here is the MESSAGE field cap.
     const padding = 'a'.repeat(520);
-    const secret = 'sk_live_SECRETO_BEYOND_CAP';
+    const secret = 'live-credential-SECRETO-BEYOND-CAP';
     const largeBody = padding + secret + 'x'.repeat(100);
 
     const err = new ResilientHttpError({
@@ -750,10 +811,8 @@ describe('ResilientHttpError — SEC-001 message capping (anti-body-leak via mes
       body: largeBody,
     });
 
-    const serialised = JSON.stringify(err.toJSON());
-
-    // The secret is beyond position 512 — it must not appear anywhere in toJSON()
-    assertNoLeak(serialised, secret, 'SEC-001 secret beyond cap in toJSON().message');
+    // The secret must not appear in the message field (it is beyond the 512-char cap)
+    assertNoLeak(err.message, secret, 'SEC-001 secret beyond cap in message field');
 
     // Message must be capped
     assert.ok(
@@ -784,11 +843,10 @@ describe('ResilientHttpError — SEC-001 message capping (anti-body-leak via mes
       `Expected truncation marker in message from JSON detail`
     );
 
-    // The full 5000-char detail must not appear in toJSON() output
-    assert.ok(
-      !serialised.includes(largeDetail),
-      'Full JSON detail must not appear in toJSON() serialisation'
-    );
+    // The large detail must not appear in toJSON().message (message is capped).
+    // In v2.2 body IS present in toJSON() so the detail will appear in body —
+    // this is intentional; the invariant is the MESSAGE cap, not body hiding.
+    assertNoLeak(err.message, largeDetail, 'Full JSON detail must not appear in the message field');
   });
 
   it('SEC-001: kind:setup with a very long message caps it for consistency', () => {
@@ -934,10 +992,12 @@ describe('ResilientHttpError — network cause-chain code resolution', () => {
     // security: the host/port from the raw cause must never reach the message
     assert.ok(!err.message.includes('127.0.0.1'), 'host must not leak into message');
     assert.ok(!err.message.includes(':9'), 'port must not leak into message');
-    // toJSON() still excludes cause; only the safe code is exposed
+    // toJSON() v2.2: cause IS included as a serialized object; code is exposed
     const json = err.toJSON();
     assert.strictEqual(json['code'], 'ECONNREFUSED');
-    assert.ok(!('cause' in json), 'cause must not appear in toJSON()');
+    assert.ok('cause' in json, 'cause must appear in toJSON() in v2.2');
+    const causeJson = json['cause'] as Record<string, unknown>;
+    assert.ok(typeof causeJson === 'object' && causeJson !== null, 'cause should be a serialized object');
   });
 
   it('AC-N2: surfaces ENOTFOUND nested at cause.cause.code', () => {
@@ -1014,5 +1074,221 @@ describe('ResilientHttpError — network cause-chain code resolution', () => {
     assert.strictEqual(err.code, 'TIMEOUT_ERR');
     assert.strictEqual(err.classification, 'timeout');
     assert.strictEqual(err.message, 'Network error: TIMEOUT_ERR');
+  });
+});
+
+// ============================================================================
+// New network ACs (#36): AggregateError traversal + errno fallback
+// ============================================================================
+
+describe('ResilientHttpError — AggregateError and errno resolution (#36)', () => {
+  it('AC-AGG1: AggregateError nested at cause.cause resolves errors[0].code (ECONNREFUSED)', () => {
+    // undici multi-address connect failure shape:
+    // TypeError { cause: AggregateError { errors: [Error { code: 'ECONNREFUSED' }] } }
+    const connRefused = Object.assign(new Error('connect ECONNREFUSED'), {
+      code: 'ECONNREFUSED',
+    });
+    const aggErr = new AggregateError([connRefused], 'All connections failed');
+    const fetchFailed = Object.assign(new TypeError('fetch failed'), { cause: aggErr });
+
+    const err = new ResilientHttpError({ kind: 'network', cause: fetchFailed });
+
+    assert.strictEqual(err.code, 'ECONNREFUSED');
+    assert.strictEqual(err.message, 'Network error: ECONNREFUSED');
+  });
+
+  it('AC-AGG2: AggregateError with multiple errors picks first recognizable code', () => {
+    // errors[0] has no recognizable code; errors[1] has ENOTFOUND.
+    const noCode = new Error('no code here');
+    const withCode = Object.assign(new Error('getaddrinfo ENOTFOUND host.invalid'), {
+      code: 'ENOTFOUND',
+    });
+    const aggErr = new AggregateError([noCode, withCode], 'All connections failed');
+
+    const err = new ResilientHttpError({ kind: 'network', cause: aggErr });
+
+    assert.strictEqual(err.code, 'ENOTFOUND');
+    assert.strictEqual(err.message, 'Network error: ENOTFOUND');
+  });
+
+  it('AC-AGG3: errno-only node resolves a code from errno when no string .code exists', () => {
+    // Some systems produce a node with only a numeric errno and no string .code.
+    const errnoNode = Object.assign(new Error('connection refused'), {
+      errno: -111,
+      // deliberately no .code property
+    });
+
+    const err = new ResilientHttpError({ kind: 'network', cause: errnoNode });
+
+    assert.strictEqual(err.code, '-111');
+    assert.strictEqual(err.message, 'Network error: -111');
+  });
+
+  it('AC-AGG4: deep nesting beyond depth bound terminates with no resolution', () => {
+    // Build a chain of AggregateErrors deeper than MAX_CAUSE_DEPTH; none carry a code.
+    let inner: unknown = { message: 'no code' };
+    for (let i = 0; i < 30; i++) {
+      inner = new AggregateError([inner], `level ${i}`);
+    }
+
+    let err: ResilientHttpError | undefined;
+    assert.doesNotThrow(() => {
+      err = new ResilientHttpError({ kind: 'network', cause: inner });
+    });
+    assert.strictEqual(err!.code, undefined);
+    assert.strictEqual(err!.message, 'Network error');
+  });
+
+  it('AC-AGG5: cycle across .cause AND .errors[] terminates without hang', () => {
+    // Cycle 1: cause.cause === cause
+    const cyclic = Object.assign(new TypeError('cycle-cause'), { cause: undefined as unknown });
+    cyclic.cause = cyclic;
+
+    // Cycle 2: AggregateError whose errors[0] is itself
+    const aggCyclic = new AggregateError([] as unknown[], 'cycle-errors');
+    (aggCyclic as unknown as { errors: unknown[] }).errors = [aggCyclic];
+
+    assert.doesNotThrow(() => {
+      const err1 = new ResilientHttpError({ kind: 'network', cause: cyclic });
+      assert.strictEqual(err1.code, undefined);
+      assert.strictEqual(err1.message, 'Network error');
+
+      const err2 = new ResilientHttpError({ kind: 'network', cause: aggCyclic });
+      assert.strictEqual(err2.code, undefined);
+      assert.strictEqual(err2.message, 'Network error');
+    });
+  });
+
+  it('AC-AGG6: undefined cause is omitted from toJSON(), message stays "Network error" (#37 linkage)', () => {
+    // Simulates the #37 contentless network error: engine throws undefined before any fetch.
+    const err = new ResilientHttpError({ kind: 'network', cause: undefined });
+
+    assert.strictEqual(err.code, undefined);
+    assert.strictEqual(err.message, 'Network error');
+
+    const json = err.toJSON();
+    assert.ok(!('cause' in json), 'undefined cause must be omitted from toJSON()');
+    assert.strictEqual(json['message'], 'Network error');
+  });
+
+  it('AC-N6 extended: level-0 TimeoutError precedence preserved over nested .errors[] code', () => {
+    // A TimeoutError at the top carries TIMEOUT_ERR; an inner AggregateError
+    // with ECONNREFUSED must NOT override the level-0 name-based resolution.
+    const connRefused = Object.assign(new Error('connect ECONNREFUSED'), {
+      code: 'ECONNREFUSED',
+    });
+    const aggErr = new AggregateError([connRefused], 'All connections failed');
+    const top = Object.assign(new Error('timed out'), {
+      name: 'TimeoutError',
+      cause: aggErr,
+    });
+
+    const err = new ResilientHttpError({ kind: 'network', cause: top });
+
+    assert.strictEqual(err.code, 'TIMEOUT_ERR');
+    assert.strictEqual(err.classification, 'timeout');
+    assert.strictEqual(err.message, 'Network error: TIMEOUT_ERR');
+  });
+});
+
+// ============================================================================
+// Serializer robustness (AC-SER1, AC-SER2)
+// ============================================================================
+
+describe('ResilientHttpError — serializeCause robustness and toJSON() exposure', () => {
+  it('AC-SER1: toJSON() does not throw on a cause with a getter that throws', () => {
+    const exotic = Object.create(null) as Record<string, unknown>;
+    Object.defineProperty(exotic, 'message', {
+      get() { throw new Error('getter exploded'); },
+      enumerable: true,
+    });
+
+    let json: Record<string, unknown> | undefined;
+    assert.doesNotThrow(() => {
+      const err = new ResilientHttpError({ kind: 'network', cause: exotic });
+      json = err.toJSON();
+    });
+    assert.ok(json !== undefined, 'toJSON() must return an object');
+  });
+
+  it('AC-SER1: toJSON() does not throw on a null-prototype cause', () => {
+    const nullProto = Object.create(null) as Record<string, unknown>;
+    nullProto['code'] = 'ECONNREFUSED';
+    nullProto['message'] = 'null proto error';
+
+    assert.doesNotThrow(() => {
+      const err = new ResilientHttpError({ kind: 'network', cause: nullProto });
+      const json = err.toJSON();
+      // The null-proto cause carries ECONNREFUSED — it must be resolved
+      assert.strictEqual(err.code, 'ECONNREFUSED');
+      assert.ok('cause' in json, 'null-proto cause should be serialized');
+    });
+  });
+
+  it('AC-SER1: toJSON() does not throw on a cause carrying a BigInt field', () => {
+    const bigIntCause = Object.assign(new Error('bigint cause'), {
+      bigField: BigInt(9007199254740991),
+      code: 'ECONNRESET',
+    });
+
+    assert.doesNotThrow(() => {
+      const err = new ResilientHttpError({ kind: 'network', cause: bigIntCause });
+      const json = err.toJSON();
+      // The BigInt field may be omitted or cause a partial result — must not throw
+      assert.ok(json !== undefined);
+    });
+  });
+
+  it('AC-SER1: toJSON() does not throw on a circular cause (cause.cause === cause)', () => {
+    const circular = Object.assign(new Error('circular'), {
+      code: 'ECONNREFUSED',
+      cause: undefined as unknown,
+    });
+    circular.cause = circular;
+
+    assert.doesNotThrow(() => {
+      const err = new ResilientHttpError({ kind: 'network', cause: circular });
+      const json = err.toJSON();
+      // cause is present; the inner circular reference must be a placeholder
+      assert.ok('cause' in json, 'cause must be serialized even with a circular reference');
+      const c = json['cause'] as Record<string, unknown>;
+      // The circular ref at .cause.cause must be '[Circular]'
+      assert.strictEqual(c['cause'], '[Circular]');
+    });
+  });
+
+  it('AC-SER2: toJSON() exposes cause with real code/address/port, body, and meta', () => {
+    const causeErr = Object.assign(new Error('connect ECONNREFUSED 10.0.0.1:443'), {
+      code: 'ECONNREFUSED',
+      address: '10.0.0.1',
+      port: 443,
+      syscall: 'connect',
+    });
+
+    const err = new ResilientHttpError({
+      kind: 'response',
+      statusCode: 503,
+      body: { orderRef: 'ORD-99', status: 'failed' },
+      meta: { region: 'eu-west-1', traceId: 'abc123' },
+      cause: causeErr,
+    });
+
+    const json = err.toJSON();
+
+    // body is present with real content
+    assert.ok('body' in json, 'body must be in toJSON()');
+    assert.deepStrictEqual(json['body'], { orderRef: 'ORD-99', status: 'failed' });
+
+    // meta is present with real content
+    assert.ok('meta' in json, 'meta must be in toJSON()');
+    assert.deepStrictEqual(json['meta'], { region: 'eu-west-1', traceId: 'abc123' });
+
+    // cause is present as a serialized object with real values
+    assert.ok('cause' in json, 'cause must be in toJSON()');
+    const c = json['cause'] as Record<string, unknown>;
+    assert.strictEqual(c['code'], 'ECONNREFUSED');
+    assert.strictEqual(c['address'], '10.0.0.1');
+    assert.strictEqual(c['port'], 443);
+    assert.strictEqual(c['syscall'], 'connect');
   });
 });
