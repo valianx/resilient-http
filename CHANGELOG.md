@@ -1,6 +1,11 @@
 # Changelog
 
-## [Unreleased]
+## 2.2.1
+
+### Patch Changes
+
+Audit remediation (PR #42) plus documentation hardening. Documentation, tests, and
+tooling only — **no public API or runtime behavior changes.**
 
 ### Changed
 
@@ -35,6 +40,15 @@
 - **OD-1** `README.md` and `docs/configuration.md` strengthened with explicit opt-in
   guidance for `redactQueryParams`: consumers logging `toJSON()` output where request URLs
   carry secrets in query strings must enable it. No behavior change.
+
+- **README** quick-start now carries a prominent `timeout` vs `deadline` callout:
+  `deadline` is an **absolute** `Date.now()`-based timestamp (use `Date.now() + ms`);
+  relative values are rejected with `ResilientHttpError{kind:'setup'}` (the #37 footgun).
+  Complements the existing guardrail, JSDoc, `docs/configuration.md`, and use-case 09.
+
+- **tests** the decorrelated-jitter feed-forward engine test is skipped under Bun
+  (its `node:test` shim has no `mock.timers`; the test needs 200s fake-clock ticks).
+  Node runs all 384 tests; no production code affected.
 
 ### Removed
 
