@@ -79,6 +79,27 @@ diagnosis; it redacts sensitive headers and caps the message, but is **not** a r
 boundary — sanitize before forwarding to an untrusted client. See the full error reference
 and the BFF sanitization pattern in [docs/configuration.md](./docs/configuration.md#error-handling--resilienthttperror).
 
+## Query-param redaction
+
+If your request URLs carry secrets in query strings (API keys, tokens, session IDs), enable
+`redactQueryParams` so those values are replaced with `[REDACTED]` in the `toJSON()` `url`
+field. This option is **opt-in** — the library does not redact query params by default.
+
+```typescript
+const client = createResilientHttp({
+  baseURL: 'https://api.example.com',
+  redactQueryParams: ['api_key', 'token', 'secret'],
+});
+
+// toJSON().url will show: https://api.example.com/resource?api_key=[REDACTED]
+```
+
+Configure it at the instance level so every request through that client benefits. If you
+log `err.toJSON()` output to an external service and your URLs contain secrets, this option
+is required to prevent credential leakage. See
+[docs/configuration.md](./docs/configuration.md#redaction-denylist) and
+[docs/use-cases/13-redaction.ts](./docs/use-cases/13-redaction.ts).
+
 ---
 
 ## Documentation
