@@ -41,6 +41,16 @@ const { data, status } = await client.get<{ id: number; name: string }>('/users/
 console.log(status, data?.name);
 ```
 
+> **⚠️ `timeout` vs `deadline` — different units.** `timeout` is a **relative duration** in ms (per attempt). `deadline` is an **absolute timestamp** (`Date.now()`-based) for the whole operation, retries included:
+>
+> ```typescript
+> timeout: 5_000,                  // ✅ 5 seconds per attempt
+> deadline: Date.now() + 8_000,    // ✅ absolute: 8 seconds from now, total budget
+> deadline: 8_000,                 // ❌ throws ResilientHttpError{kind:'setup'} — relative values are rejected
+> ```
+>
+> Passing a relative value to `deadline` fails fast at construction (and per request) with a descriptive setup error, so the mistake cannot silently break every request. See [`09-timeout-and-deadline.ts`](./docs/use-cases/09-timeout-and-deadline.ts).
+
 ## Error handling
 
 Every failure throws a `ResilientHttpError` with one of three kinds:
