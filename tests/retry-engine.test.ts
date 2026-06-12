@@ -30,6 +30,9 @@ import assert from 'node:assert/strict';
 import { executeWithRetry, executeWithRetryAndSignal } from '../src/retry/engine';
 import { enableFakeTimers, tick, flush, resetTimers } from './test-utils.ts';
 
+// Bun detection — safe for @types/node scope (Bun is not in the Node type defs).
+const IS_BUN = typeof (globalThis as Record<string, unknown>).Bun !== 'undefined';
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -1647,7 +1650,7 @@ describe('AC-6 (F4): decorrelated-jitter previousDelay feeds forward across atte
   // upper bound to be initialDelay * 3 instead of delay[0] * 3.
   // With initialDelay:100, maxDelay:200000, and 3 retries, we capture all three
   // onRetry delays and verify each successive one's bound.
-  it('each successive delay respects the decorrelated formula with fed-forward previousDelay', async (t) => {
+  it('each successive delay respects the decorrelated formula with fed-forward previousDelay', { skip: IS_BUN ? 'Bun has no mock.timers — this test needs 200s fake-clock ticks (real-time in Bun exceeds the 5s timeout)' : false }, async (t) => {
     enableFakeTimers(t);
     const capturedDelays: number[] = [];
     let calls = 0;
